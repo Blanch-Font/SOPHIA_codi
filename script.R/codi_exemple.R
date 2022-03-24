@@ -243,6 +243,54 @@ TIA_vars <- FeatureExtraction::createAnalysisDetails(
   includedCovariateConceptIds = c(373503, 381591),
   addDescendantsToInclude = TRUE)
 
+A10_conceptId <- c(21600712,
+                   782681, 793321, 1502829, 1502830, 1503327, 1525221, 1529352,
+                   1547554, 1596977, 1597761, 1597772, 1597773, 1597781, 1597792,
+                   19006931, 19021312, 19023424, 19023425, 19023426, 19029030, 19029061,
+                   19058398, 19059800, 19077638, 19077682, 19078552, 19078559, 19079293,
+                   19079465, 19095211, 19095212, 19099055, 19101729, 19112791, 19125041,
+                   19125045, 19125049, 19129179, 19133793, 19135264, 21022404, 21036596,
+                   21061594, 21061613, 21076306, 21081251, 21086042, 21100924, 21114195,
+                   21133671, 21169719, 35408233, 35410536, 35412102, 35412890, 35412958,
+                   36403507, 36403509, 36884964, 40044221, 40051377, 40052768, 40054707,
+                   40139098, 40164885, 40164888, 40164891, 40164897, 40164913, 40164916,
+                   40164942, 40164943, 40164946, 40166037, 40166041, 40239218, 42479624,
+                   42479783, 42481504, 42481541, 42482012, 42482588, 42656231, 42656236,
+                   42656240, 42708086, 42708090, 42899447, 42902356, 42902587, 42902742,
+                   42902821, 42902945, 42902992, 42903059, 42903341, 43013885, 43013905,
+                   43013911, 43013918, 43013924, 43013928, 43526467, 43526471, 44032735,
+                   44058584, 44123708, 44785831, 45774709, 45774754, 45774893, 46233969,
+                   46234047, 46234234, 46234237, 46287408, 46287689)
+covDrug <- FeatureExtraction::createCovariateSettings(
+  useDrugExposureLongTerm = TRUE,
+  useDrugExposureMediumTerm = TRUE,
+  useDrugEraAnyTimePrior = TRUE,
+  useDrugEraLongTerm = TRUE,
+  useDrugEraMediumTerm = TRUE,
+  useDrugEraShortTerm = TRUE,
+  useDrugEraOverlapping = TRUE,
+  useDrugGroupEraAnyTimePrior = TRUE,
+  useDrugGroupEraLongTerm = TRUE,
+  useDrugGroupEraMediumTerm = TRUE,
+  useDrugGroupEraShortTerm = TRUE,
+  useDrugGroupEraOverlapping = TRUE,
+  longTermStartDays = 2*(-365.25),
+  mediumTermStartDays = -365.25,
+  endDays = 0,
+  includedCovariateConceptIds = c(21600712, #DRUGS USED IN DIABETES
+                                  #Aquestes insulines no les troba
+                                  21076306, 44058584, 21086042, 21036596,
+                                  21601238, #C01
+                                  21600381, #C02
+                                  21601461, #C03
+                                  21601664, #C07
+                                  21601744, #C08
+                                  21601782, #C09
+                                  21601853, #C10
+                                  21603933 #M01A
+                                  ),
+  addDescendantsToInclude = TRUE)
+
 covariateSettings <- list(covDemo,
                           covMeasValueAny,
                           covMeasValueLong,
@@ -252,7 +300,8 @@ covariateSettings <- list(covDemo,
                                  angor_vars,
                                  ami_vars,
                                  stroke_vars,
-                                 TIA_vars)))
+                                 TIA_vars)),
+                          covDrug)
 
 covariateData <- FeatureExtraction::getDbCovariateData(
   connection = cdm_bbdd,
@@ -354,7 +403,8 @@ flextable::flextable(covariateData2$covariateRef %>%
                        dplyr::mutate(covariateId = as.character(floor(covariateId))) %>%
                        # filter(covariateId %in% sel_id) %>%
                        dplyr::select(-covariateId, -analysisId, -conceptId) %>%
-                       dplyr::collect())
+                       dplyr::collect()) %>%
+  flextable::colformat_double(x = ., digits = 1)
 
 sel_obes <- bbdd_covar %>%
   dplyr::filter((obesity & !is.na(obesity)) | (30 <= BMI & !is.na(BMI))) %>%
@@ -368,8 +418,8 @@ flextable::flextable(covariateData2_obes$covariateRef %>%
                        dplyr::mutate(covariateId = as.character(floor(covariateId))) %>%
                        # filter(covariateId %in% sel_id) %>%
                        dplyr::select(-covariateId, -analysisId, -conceptId) %>%
-                       dplyr::collect())
-
+                       dplyr::collect()) %>%
+  flextable::colformat_double(x = ., digits = 1)
 
 result <- createTable1(covariateData2, output = 'one column')
 View(result)
