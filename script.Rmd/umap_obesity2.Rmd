@@ -1,0 +1,591 @@
+---
+title: "UMAP: Tota la població"
+author: "JBF"
+date: '`r Sys.time()`'
+output: 
+  html_document: 
+    toc: yes
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+# library(umap)
+library(uwot)
+library(gridExtra)
+library(ClusterR)
+library(splines)
+# library(dbscan)
+
+# Carreguem les dades
+load('/home/idiap/projects/SOPHIA_codi/data.RData')
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+  mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+```
+
+# Descriptiva de les variables
+## Distribució variables numèriques
+```{r}
+ggplot(bbdd_covar %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(obesity_BMI ~ name, scales = "free")
+```
+
+
+## Eliminem els valors atípics
+Eliminem els valors superiors a mn +/- 5*SD
+```{r distributions, fig.width=20, fig.height=10}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+
+bbdd_covar <- bbdd_covar %>%
+  group_by(obesity_BMI) %>% 
+  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose'),
+                remove_outliers))
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI,
+                                  Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
+         sex_female, obesity_BMI, Current, Former,
+         ami, angor, stroke, tia,
+         A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
+
+options(repr.plot.width = 20)
+ggplot(bbdd %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(obesity_BMI ~ name, scales = "free")
+```
+
+## Correlacions
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+  group_by(obesity_BMI) %>% 
+  group_modify(~{.x %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 16)
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>% 
+  map(~{.x %>%
+      select(-c(obesity_BMI)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation", main = .x$obesity_BMI)
+  }) %>%
+  wrap_plots(ncol = 2, guides = "collect")
+```
+
+# Residualized
+```{r residualization}
+bbdd_resid <- bbdd %>%
+  mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09)) %>% 
+  group_by(obesity_BMI) %>%
+  group_modify(~{
+    .x %>% 
+    transmute(rowId,
+              across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg",
+                       "DBP", "SBP"),
+                     function(v,...){
+                       dd <- data.frame(vcol = v, a = age, s = sex_female, b = BMI, c = Current,
+                                        d = Former, a10a = A10A, a10b = A10B, f = C10, g = HTA_med)
+                       knots_age <- quantile(x = dd$age,
+                                             probs = c(0.2, 0.4, 0.6, 0.8))
+                       knots_BMI <- quantile(x = dd$BMI,
+                                             probs = c(0.2, 0.4, 0.6, 0.8))
+                       lm(vcol ~ s + bs(a, knots = knots_age) + bs(b, knots = knots_BMI) +
+                            c + a10a + a10b + f + g, data = dd) %>%
+                         resid %>% scale %>% as.vector
+                     }))
+  }) %>%
+  ungroup
+
+ggplot(bbdd_resid %>%
+         pivot_longer(-c(rowId, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(obesity_BMI ~ name, scales = "free")
+```
+
+## UMAP
+Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
+```{r umap_resid}
+sex_labels_resid <- bbdd_resid %>%
+  group_split(obesity_BMI) %>%
+  map(~.x$obesity_BMI[1])
+
+umap_resid_50 <- bbdd_resid %>%
+  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>% 
+  map(function(strat, ...){
+    umap(X = strat,
+       n_neighbors = 50,
+       metric = "manhattan",
+       min_dist = 0.001)
+  })
+bbdd_umap_50_resid <- map2_dfr(umap_resid_50, sex_labels_resid,
+                               ~.x %>%
+                                 data.frame %>%
+                                 mutate(obesity_BMI = .y))
+
+ggplot(bbdd_umap_50_resid,
+       aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~obesity_BMI, nrow = 2) +
+  theme_bw()
+```
+
+## GMM
+```{r}
+BIC_curve <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_GMM(data = strat %>% select(-obesity_BMI),
+                                max_clusters = 1:20, criterion = "BIC",
+                                em_iter = 10, plot_data = FALSE)
+    data.frame(obesity_BMI = strat$obesity_BMI[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ obesity_BMI, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+ggplot(data = BIC_curve %>%
+         mutate(bicgrad = abs(BIC - lag(BIC))) %>%
+         ungroup %>%
+         drop_na,
+       aes(nclus - .5, bicgrad)) +
+  geom_col(alpha = .3, color = "darkgrey") +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ obesity_BMI, scales = "free") +
+  labs(x = "N clusters", y = "BIC change") +
+  theme_bw()
+
+fxclus <- function(x, k){
+    mod <- GMM(data = x, gaussian_comps = k, em_iter = 10)
+    pred <- predict_GMM(x, CENTROIDS = mod$centroids, 
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(cluster = as.integer(pred$cluster_labels)))
+}
+
+res_sil <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    map_dfr(2:10, function(k){
+      map_dfr(1:100, function(iter){
+        set.seed(iter)
+        scaledat <- strat %>%
+          select(-obesity_BMI) %>%
+          slice_sample(n = 1000)
+        d <- dist(as.matrix(scaledat))
+        res <- fxclus(scaledat, k)
+        ave_sil <- cluster::silhouette(res$cluster, d)
+        data.frame(nclus = k, mean_sil_width = mean(ave_sil[,"sil_width"]))
+      })
+    })
+  },
+  .id = "obesity_BMI")
+
+res_sil %>%
+  group_by(obesity_BMI, nclus) %>%
+  summarise(mean_sw = mean(mean_sil_width),
+            se_sw = sd(mean_sil_width)/(sqrt(length(mean_sil_width))),
+            .groups = "drop") %>%
+  ggplot(aes(nclus, mean_sw)) +
+  geom_line(group = 1) +
+  geom_linerange(aes(ymin = mean_sw - se_sw, ymax = mean_sw + se_sw)) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10) +
+  facet_wrap(~ obesity_BMI, nrow = 1, scales = "free") +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Mean silhouette width")
+
+bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    map_dfr(2:20, function(nclus){
+      scaledat <- strat %>%
+          select(-obesity_BMI)
+      data.frame(cluster = fxclus(scaledat, nclus)$cluster) %>%
+        count(cluster) %>%
+        mutate(n = 100 * (n/sum(n))) %>%
+        slice_min(n, with_ties = FALSE) %>%
+        mutate(nclus)
+    })
+  },
+  .id = 'obesity_BMI') %>%
+  ggplot(aes(nclus, n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  facet_wrap(~obesity_BMI, nrow = 1) +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Size of smallest cluster (%)")
+```
+### 5 grups
+```{r}
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-obesity_BMI)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 5,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$obesity_BMI[1]))
+  })
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  theme_bw()
+
+gmm_res %>%
+    map(function(strata){
+      data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+        ggplot(aes(MaxProb)) +
+        geom_histogram(bins = 10, fill = "lightblue", color = "black")
+    }) %>%
+  wrap_plots &
+  theme_bw() &
+  labs(y = "Count")
+
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "obesity_BMI") %>%
+    ggplot(aes(obesity_BMI, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       obesity_BMI = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~obesity_BMI) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+gmm_res %>%
+  map2(bbdd %>%
+         select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+         group_by(obesity_BMI, .add = T) %>%
+         group_split(),
+       function(strata, data){
+         varnames <- names(select(data, -c(obesity_BMI)))
+         centroid_dat <- strata$mod$centroids %>%
+           data.frame %>%
+           setNames(paste0(varnames, "_mean"))
+         sd_dat <- strata$mod$covariance_matrices %>%
+           sqrt %>%
+           data.frame %>%
+           setNames(paste0(varnames, "_sd"))
+         cbind(centroid_dat, sd_dat) %>%
+           tibble::rownames_to_column("component") %>%
+           pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+           mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+           ggplot(aes(mean, component)) +
+           geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+           geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+           geom_point(size = 2) +
+           facet_wrap(~name, ncol = 3, scales = "free_x") +
+           labs(title = strata$grp, x = NULL, y = NULL) +
+           theme_bw()
+       }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(obesity_BMI, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-obesity_BMI, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, obesity_BMI)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$obesity_BMI[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+## K-means clusters
+```{r}
+BIC_curve <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_KMeans(data = strat %>% select(-obesity_BMI),
+                                   max_clusters = 1:20, criterion = "BIC",
+                                   max_iters = 100, plot_clusters = FALSE)
+    data.frame(obesity_BMI = strat$obesity_BMI[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ obesity_BMI, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+ggplot(BIC_curve %>%
+         mutate(bicgrad = abs(BIC - lag(BIC))) %>%
+         ungroup %>%
+         drop_na,
+       aes(nclus - .5, bicgrad)) +
+  geom_col(alpha = .3, color = "darkgrey") +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ obesity_BMI , scales = "free") +
+  labs(x = "N clusters", y = "BIC change") +
+  theme_bw()
+
+fxclus <- function(x, k){
+    mod <- KMeans_rcpp(data = x, clusters = k)
+    return(list(cluster = as.integer(mod$clusters)))
+}
+
+res_sil <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    map_dfr(2:10, function(k){
+      map_dfr(1:100, function(iter){
+        set.seed(iter)
+        scaledat <- strat %>%
+          select(-c(obesity_BMI)) %>%
+          slice_sample(n = 1000)
+        d <- dist(as.matrix(scaledat))
+        res <- fxclus(scaledat, k)
+        ave_sil <- cluster::silhouette(res$cluster, d)
+        data.frame(nclus = k, mean_sil_width = mean(ave_sil[,"sil_width"]))
+      })
+    })
+  },
+  .id = "obesity_BMI")
+
+ggplot(data = res_sil %>%
+         group_by(obesity_BMI, nclus) %>%
+         summarise(mean_sw = mean(mean_sil_width),
+                   se_sw = sd(mean_sil_width)/(sqrt(length(mean_sil_width))),
+                   .groups = "drop"),
+       aes(nclus, mean_sw)) +
+  geom_line(group = 1) +
+  geom_linerange(aes(ymin = mean_sw - se_sw, ymax = mean_sw + se_sw)) +
+  geom_point() +
+  facet_wrap(~ obesity_BMI, nrow = 1, scales = "free") +
+  scale_x_continuous(breaks = 1:10) +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Mean silhouette width")
+
+bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    scaledat <- strat %>%
+      select(-c(obesity_BMI))
+    map_dfr(2:15, function(nclus){
+      data.frame(cluster = fxclus(scaledat, nclus)$cluster) %>%
+        count(cluster) %>%
+        mutate(n = 100 * (n/sum(n))) %>%
+        slice_min(n, with_ties = FALSE) %>%
+        mutate(nclus)
+    })
+  },
+  .id = "obesity_BMI") %>%
+  ggplot(aes(nclus, n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  facet_wrap(~obesity_BMI, nrow = 1) +
+  theme_bw()
+```
+
+### 5 grups
+```{r}
+set.seed(12345)
+km_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-c(obesity_BMI))
+    KMeans_rcpp(data = scaledat,
+                clusters = 5,
+                num_init = 10,
+                fuzzy = TRUE)
+  })
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map2_dfr(km_res,
+           ~.x %>%
+             bind_cols(cluster_km = as.factor(.y$clusters)))
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_km)) +
+  theme_bw()
+
+km_res %>%
+  map(function(strata){
+    data.frame(MaxProb = apply(strata$fuzzy_clusters, 1, max)) %>%
+      ggplot(aes(MaxProb)) +
+      geom_histogram(bins = 10, fill = "lightblue", color = "black")
+  }) %>%
+  wrap_plots &
+  theme_bw() &
+  labs(y = "Count")
+
+km_res %>%
+  map_dfr(~ data.frame(prob80 = apply(.x$fuzzy_clusters, 1, max) > .8), .id = "obesity_BMI") %>%
+  ggplot(aes(obesity_BMI, fill = prob80)) +
+  geom_bar(stat="count", position ="fill") +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "%", fill = "MaxP > 80%")
+
+km_res %>%
+  map_dfr(~data.frame(cluster = .x$clusters) %>%
+            count(cluster, name = "size") %>%
+            mutate(prop = size / sum(size)),
+          .id = "obesity_BMI") %>%
+  ggplot(aes(cluster, prop * 100)) +
+  geom_col(fill = "lightblue", color = "black") +
+  facet_wrap(~obesity_BMI) +
+  theme_bw() +
+  labs(x = "Cluster", y = "%")
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, obesity_BMI) %>%
+  group_by(obesity_BMI, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(obesity_BMI, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-obesity_BMI, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_km, cluster_gmm, obesity_BMI)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))) %>%
+         ggplot(aes(cluster_km, value)) +
+         geom_boxplot(aes(group = cluster_km, colour = cluster_km)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$obesity_BMI[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+##HDBSCAN
+No dóna bons resultats

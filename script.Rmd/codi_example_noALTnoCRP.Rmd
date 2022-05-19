@@ -1,0 +1,280 @@
+---
+title: "Codi_exemple_noALTnoCRP"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+library(umap)
+load('/home/idiap/projects/SOPHIA_codi/data.RData')
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+  mutate_at(.vars = c('A10', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+
+bbdd_covar %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI) %>%
+  pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female + obesity_BMI ~ name, scales = "free")
+```
+
+```{r distributions, fig.width=20, fig.height=10}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+
+bbdd_covar <- bbdd_covar %>%
+  mutate(across(c('HbA1c', 'Leukocytes', 'cLDL', 'Tg', 'cHDL', 'DBP', 'SBP', 'Glucose'),
+                remove_outliers))
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI,
+                                  Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI, Current, Former,
+         ami, angor, stroke, tia,
+         A10, C01, C02, C03, C07, C08, C09, C10, M01A)
+
+options(repr.plot.width = 20)
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI) %>%
+  pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female + obesity_BMI ~ name, scales = "free")
+```
+
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI) %>%
+  group_by(sex_female, obesity_BMI) %>% 
+  group_modify(~{.x %>%
+      select(-rowId) %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 16)
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI) %>%
+  group_split(sex_female, obesity_BMI) %>%
+  map(~{.x %>%
+      select(-c(rowId, sex_female, obesity_BMI)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation", main = paste(.x$sex_female, .x$obesity_BMI))
+    }) %>%
+  wrap_plots(nrow = 2, guides = "collect")
+```
+
+```{r stratification}
+strat_dat <- bbdd %>%
+  # select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+  #        sex_female, obesity_BMI) %>%
+  group_by(sex_female, obesity_BMI) %>%
+  # mutate_at(.vars = c('HbA1c', 'Leukocytes', 'cLDL', 'Tg', 'cHDL', 'DBP', 'SBP', 'Glucose'),
+  #           scale) %>% 
+  group_modify(~{.x %>%
+      transmute(rowId,
+                across(-c(rowId, age, BMI,
+                          Current, Former,
+                          ami, angor, stroke, tia,
+                          A10, C01, C02, C03, C07, C08, C09, C10, M01A),
+                       function(v,...){
+                         dd <- data.frame(vcol = v, a = .x$age, b = .x$BMI,
+                                          c = .x$Current, d = .x$Former,
+                                          e = .x$A10)
+                         lm(vcol ~ a + b + c + d + e, data = dd) %>%
+                           resid %>% scale %>% as.vector
+                         }))
+    }) %>%
+  ungroup
+
+strat_dat %>%
+  count(sex_female, obesity_BMI)
+```
+
+```{r distribuitions_after_trandformation, fig.width=20, fig.height=10}
+options(repr.plot.width = 20)
+strat_dat %>%
+  pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female + obesity_BMI ~ name, scales = "free")
+```
+
+```{r correlations_after_transf, fig.width=12, fig.height=5}
+strat_dat %>%
+  group_by(sex_female, obesity_BMI) %>%
+  group_modify(~{.x %>%
+      select(-rowId) %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 16)
+strat_dat %>%
+  group_split(sex_female, obesity_BMI) %>%
+  map(~{.x %>%
+      select(-c(rowId, sex_female, obesity_BMI)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation")
+    }) %>%
+  wrap_plots(nrow = 2, guides = "collect")
+```
+
+<!-- ```{r linear_dimensionality_reduction} -->
+<!-- options(repr.plot.width = 8, repr.plot.height = 4, repr.plot.res = 180) -->
+<!-- pca_res <- strat_dat %>% -->
+<!--   split(~ sex_female + obesity_BMI) %>% -->
+<!--   map(~.x %>% select(-c(rowId, sex_female, obesity_BMI)) %>% prcomp) -->
+<!-- ``` -->
+
+<!-- ```{r variance_explained} -->
+<!-- pca_res %>% -->
+<!--   imap(~{eigs <- .x$sdev^2 -->
+<!--   varexp <- round(eigs / sum(eigs), 4) -->
+<!--   data.frame(ncomp = 1:length(varexp), ve = 100 * varexp) %>% -->
+<!--     mutate(ve_cs = cumsum(ve)) %>% -->
+<!--     ggplot(aes(ncomp, ve_cs)) + -->
+<!--     geom_area(fill = "lightblue", alpha = .5) + -->
+<!--     geom_line(group = 1) + -->
+<!--     geom_point() +  -->
+<!--     geom_hline(yintercept = 95, linetype = "dashed", color = "red") + -->
+<!--     scale_x_continuous(breaks = 1:length(varexp)) + -->
+<!--     theme_bw() + -->
+<!--     labs(title = .y, x = NULL, y = NULL) -->
+<!--   }) %>% -->
+<!--   modify_at(1, ~.x + labs(y = "Cumulative % variance explained")) %>% -->
+<!--   wrap_plots(nrow = 2) %>% -->
+<!--   wrap_plots(grid::textGrob("Number of components"), ncol = 1, heights = c(.99, .01)) -->
+<!-- ``` -->
+
+<!-- ```{r scatter_plot_PCA} -->
+<!-- pca_res %>% -->
+<!--   imap(~{eigs <- .x$sdev^2 -->
+<!--   varexp <- round(eigs / sum(eigs), 4) -->
+<!--   .x %>% -->
+<!--     "$"("x") %>% -->
+<!--     "["(,c(1,2)) %>% -->
+<!--     data.frame %>% -->
+<!--     ggplot(aes(PC1, PC2)) + -->
+<!--     geom_point(alpha = .1) + -->
+<!--     theme_bw() + -->
+<!--     labs(title = .y, -->
+<!--          x = paste0("PC1 (", varexp[1] * 100, "%)"), -->
+<!--          y = paste0("PC2 (", varexp[2] * 100, "%)")) -->
+<!--   }) %>% -->
+<!--   wrap_plots(nrow = 2) -->
+<!-- ``` -->
+
+```{r Non-linear_dimansionality_reduction}
+# Customizing UMAP settings
+custom.config <- umap.defaults
+
+# Number of iterations
+custom.config$n_epochs <- 100
+
+# Metric
+custom.config$metric <- 'manhattan'
+
+# Setting minimal number of neighbors as the squared root of sample size (random sample of 10000 individuals)
+# sample_size <- 1000
+# custom.config$n_neighbors <- 50
+custom.config$min_dist <- 0.25
+
+#Running UMAP
+sex_labels <- strat_dat %>%
+  group_split(sex_female) %>%
+  map(~.x$sex_female[1])
+# sex_labels <- strat_dat %>%
+#   group_split(sex_female, obesity_BMI) %>%
+#   map(~paste(.x$sex_female[1], .x$obesity_BMI[1]))
+
+umap_res <- strat_dat %>%
+  select(-obesity_BMI) %>% 
+  group_split(sex_female) %>% #, obesity_BMI) %>%
+  map(function(strat, ...){
+    strat %>%
+      select(-c(rowId, sex_female)) %>% #, obesity_BMI)) %>%
+      # sample_n(sample_size) %>%
+      umap(config = custom.config)
+    })
+
+options(repr.plot.width = 8, repr.plot.height = 4, repr.plot.res = 180)
+map2_dfr(umap_res, sex_labels,
+         ~.x$layout %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 2) +
+  theme_bw()
+```
+
+```{r }
+sampsize <- 1000
+custom.config$n_neighbors <- sqrt(sampsize)*2
+custom.config$min_dist <- 0.01
+umap_res2 <- strat_dat %>%
+  group_split(sex_female, obesity_BMI) %>%
+  map(function(strat, ...){
+    map(1:5,
+        function(iter){
+          strat %>%
+            select(-c(rowId, sex_female, obesity_BMI)) %>%
+            sample_n(sampsize) %>%
+            umap(config = custom.config)
+          })
+    })
+
+options(repr.plot.width = 8, repr.plot.height = 12, repr.plot.res = 180)
+map2_dfr(umap_res2, sex_labels,
+         ~.x %>%
+           map_dfr(function(iter, ...){
+             iter$layout %>% 
+               data.frame
+             },
+             .id = "iter") %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_grid(iter~sex) +
+  theme_bw()
+```
+

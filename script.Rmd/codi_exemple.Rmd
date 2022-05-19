@@ -1,0 +1,240 @@
+---
+title: "Codi_exemple"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+library(umap)
+load('/home/idiap/projects/SOPHIA_codi/data.RData')
+```
+
+```{r distributions, fig.width=20, fig.height=10}
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, BMI, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                                  ALT, CRP, Ferritin))
+#, HbA1c
+bbdd_cc <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, ALT, CRP, Ferritin,
+         sex_female, obesity, Current, Former,
+         A10, C01, C02, C03, C07, C08, C09, C10, M01A) %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI))
+bbdd <- bbdd_cc %>%
+  select(rowId, age, BMI, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, ALT, CRP, Ferritin,
+         sex_female)
+
+options(repr.plot.width = 30)
+bbdd %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  pivot_longer(-c(rowId, sex_female)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free_x")
+```
+
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  group_by(sex_female) %>%
+  group_modify(~{.x %>%
+      select(-rowId) %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 32)
+bbdd %>%
+  group_split(sex_female) %>%
+  map(~{.x %>%
+      select(-c(rowId, sex_female)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation")
+    }) %>%
+  wrap_plots(nrow = 1, guides = "collect")
+```
+
+```{r stratification}
+strat_dat <- bbdd %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_by(sex_female) %>%
+  group_modify(~{.x %>%
+      transmute(rowId,
+                across(-c(rowId, age, BMI),
+                       function(v,...){
+                         d <- data.frame(vcol = v, a = .x$age, b = .x$BMI)
+                         lm(vcol ~ a + b, data = d) %>%
+                           resid %>% scale %>% as.vector
+                         }))
+    }) %>%
+  ungroup
+
+strat_dat %>%
+  count(sex_female)
+```
+
+```{r distribuitions_after_trandformation, fig.width=20, fig.height=10}
+options(repr.plot.width = 40)
+strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  pivot_longer(-c(rowId, sex_female)) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free_x")
+```
+
+```{r correlations_after_transf, fig.width=12, fig.height=5}
+strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_by(sex_female) %>%
+  group_modify(~{.x %>%
+      select(-rowId) %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 32)
+strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_split(sex_female) %>%
+  map(~{.x %>%
+      select(-c(rowId, sex_female)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation")
+    }) %>%
+  wrap_plots(nrow = 1, guides = "collect")
+```
+
+```{r linear_dimensionality_reduction}
+options(repr.plot.width = 8, repr.plot.height = 4, repr.plot.res = 180)
+pca_res <- strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  split(f = .$sex_female) %>%
+  map(~.x %>% select(-c(rowId, sex_female)) %>% prcomp)
+```
+
+```{r variance_explained}
+pca_res %>%
+  imap(~{eigs <- .x$sdev^2
+  varexp <- round(eigs / sum(eigs), 4)
+  data.frame(ncomp = 1:length(varexp), ve = 100 * varexp) %>%
+    mutate(ve_cs = cumsum(ve)) %>%
+    ggplot(aes(ncomp, ve_cs)) +
+    geom_area(fill = "lightblue", alpha = .5) +
+    geom_line(group = 1) +
+    geom_point() + 
+    geom_hline(yintercept = 95, linetype = "dashed", color = "red") +
+    scale_x_continuous(breaks = 1:length(varexp)) +
+    theme_bw() +
+    labs(title = .y, x = NULL, y = NULL)
+  }) %>%
+  modify_at(1, ~.x + labs(y = "Cumulative % variance explained")) %>%
+  wrap_plots(nrow = 1) %>%
+  wrap_plots(grid::textGrob("Number of components"), ncol = 1, heights = c(.99, .01))
+```
+
+```{r scatter_plot_PCA}
+pca_res %>%
+  imap(~{eigs <- .x$sdev^2
+  varexp <- round(eigs / sum(eigs), 4)
+  .x %>%
+    "$"("x") %>%
+    "["(,c(1,2)) %>%
+    data.frame %>%
+    ggplot(aes(PC1, PC2)) +
+    geom_point(alpha = .1) +
+    theme_bw() +
+    labs(title = .y,
+         x = paste0("PC1 (", varexp[1] * 100, "%)"),
+         y = paste0("PC2 (", varexp[2] * 100, "%)"))
+  }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r Non-linear_dimansionality_reduction}
+# Customizing UMAP settings
+custom.config <- umap.defaults
+
+# Number of iterations
+custom.config$n_epochs <- 100
+
+# Setting minimal number of neighbors as the squared root of sample size (random sample of 10000 individuals)
+sample_size <- 300 # Max size permitted by my actual data
+custom.config$n_neighbors <- sqrt(sample_size)
+
+#Running UMAP
+sex_labels <- strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_split(sex_female) %>%
+  map(~.x$sex_female[1])
+
+umap_res <- strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_split(sex_female) %>%
+  map(function(strat, ...){
+    strat %>%
+      select(-c(rowId, sex_female)) %>%
+      sample_n(300) %>%
+      umap(config = custom.config)
+    })
+
+options(repr.plot.width = 8, repr.plot.height = 4, repr.plot.res = 180)
+map2_dfr(umap_res, sex_labels,
+         ~.x$layout %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 1) +
+  theme_bw()
+```
+
+```{r}
+sampsize <- 300
+custom.config$n_neighbors <- sqrt(sampsize)*2
+custom.config$min_dist <- 0.01
+umap_res2 <- strat_dat %>%
+  mutate(sex_female = factor(sex_female, labels = c('Men', 'Women'))) %>%
+  group_split(sex_female) %>%
+  map(function(strat, ...){
+    map(1:5,
+        function(iter){
+          strat %>%
+            select(-c(rowId, sex_female)) %>%
+            sample_n(sampsize) %>%
+            umap(config = custom.config)
+          })
+    })
+
+options(repr.plot.width = 8, repr.plot.height = 12, repr.plot.res = 180)
+map2_dfr(umap_res2, sex_labels,
+         ~.x %>%
+           map_dfr(function(iter, ...){
+             iter$layout %>% 
+               data.frame},
+             .id = "iter") %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_grid(iter~sex) +
+  theme_bw()
+```

@@ -1,0 +1,424 @@
+---
+title: "UMAP: Tota la població"
+author: "JBF"
+date: '`r Sys.time()`'
+output: 
+  html_document: 
+    toc: yes
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+# library(umap)
+library(uwot)
+library(gridExtra)
+library(ClusterR)
+library(splines)
+# library(dbscan)
+
+# Carreguem les dades
+load('/home/idiap/projects/SOPHIA_codi/data.RData')
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+  mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+```
+
+# Descriptiva de les variables
+## Distribució variables numèriques
+```{r}
+ggplot(bbdd_covar %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                Ferritin, sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(. ~ name, scales = "free")
+```
+
+
+## Eliminem els valors atípics
+Eliminem els valors superiors a mn +/- 5*SD
+```{r distributions, fig.width=20, fig.height=10}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+
+bbdd_covar <- bbdd_covar %>%
+  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose',
+                  'Ferritin'),
+                remove_outliers))
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI, Ferritin,
+                                  Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
+         Ferritin, sex_female, obesity_BMI, Current, Former,
+         ami, angor, stroke, tia,
+         A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
+
+options(repr.plot.width = 20)
+ggplot(bbdd %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                Ferritin, sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(. ~ name, scales = "free")
+```
+
+## Correlacions
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin) %>%
+  cor %>%
+  reshape2::melt() %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 16)
+ggplot(bbdd %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin) %>%
+         cor %>%
+         reshape2::melt(),
+       aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1)) +
+  theme_minimal() +
+  labs(x = NULL, y = NULL, fill = "Correlation")
+```
+
+# Residualized
+```{r residualization}
+knots_age <- quantile(x = bbdd$age,
+                      probs = c(0.2, 0.4, 0.6, 0.8))
+knots_BMI <- quantile(x = bbdd$BMI,
+                      probs = c(0.2, 0.4, 0.6, 0.8))
+bbdd_resid <- bbdd %>%
+  mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09)) %>% 
+  transmute(rowId,
+            across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg", "DBP", "SBP",
+                     "Ferritin"),
+                   function(v,...){
+                     
+                     dd <- data.frame(vcol = v, s = sex_female, a = age, b = BMI, c = Current,
+                                      d = Former, a10a = A10A, a10b = A10B, f = C10, g = HTA_med)
+                     lm(vcol ~ bs(a, knots = knots_age) + s + bs(b, knots = knots_BMI) +
+                          c + a10a + a10b + f + g, data = dd) %>%
+                       resid %>% scale %>% as.vector
+                     })) %>%
+  ungroup
+
+ggplot(bbdd_resid %>%
+         pivot_longer(-c(rowId)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(. ~ name, scales = "free")
+```
+
+## UMAP
+Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
+```{r umap_resid}
+umap_resid_50 <- bbdd_resid %>%
+  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin) %>% 
+  umap(X = .,
+       n_neighbors = 50,
+       metric = "manhattan",
+       min_dist = 0.001)
+bbdd_umap_50_resid <- bbdd %>%
+  select(rowId, sex_female, obesity_BMI) %>%
+  bind_cols(umap_resid_50 %>%
+              data.frame)
+
+ggplot(bbdd_umap_50_resid,
+       aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  theme_bw()
+
+ggplot(bbdd_umap_50_resid,
+       aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_grid(sex_female ~ obesity_BMI) +
+  theme_bw()
+```
+
+## GMM
+```{r}
+res <- Optimal_Clusters_GMM(data = bbdd_resid %>% select(-rowId),
+  max_clusters = 1:20, criterion = "BIC", em_iter = 10, plot_data = FALSE)
+BIC_curve <- data.frame(nclus = 1:20, 
+                        BIC = as.vector(res))
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  labs(x = "N clusters") +
+  theme_bw()
+
+ggplot(data = BIC_curve %>%
+         mutate(bicgrad = abs(BIC - lag(BIC))) %>%
+         ungroup %>%
+         drop_na,
+       aes(nclus - .5, bicgrad)) +
+  geom_col(alpha = .3, color = "darkgrey") +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  labs(x = "N clusters", y = "BIC change") +
+  theme_bw()
+
+fxclus <- function(x, k){
+    mod <- GMM(data = x, gaussian_comps = k, em_iter = 10)
+    pred <- predict_GMM(x, CENTROIDS = mod$centroids, 
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(cluster = as.integer(pred$cluster_labels)))
+}
+
+res_sil <- map_dfr(2:10, function(k){
+  map_dfr(1:100, function(iter){
+    set.seed(iter)
+    scaledat <- bbdd_resid %>%
+      select(-rowId) %>%
+      slice_sample(n = 1000)
+    d <- dist(as.matrix(scaledat))
+    res <- fxclus(scaledat, k)
+    ave_sil <- cluster::silhouette(res$cluster, d)
+    data.frame(nclus = k, mean_sil_width = mean(ave_sil[,"sil_width"]))
+  })
+})
+
+res_sil %>%
+  group_by(nclus) %>%
+  summarise(mean_sw = mean(mean_sil_width),
+            se_sw = sd(mean_sil_width)/(sqrt(length(mean_sil_width))),
+            .groups = "drop") %>%
+  ggplot(aes(nclus, mean_sw)) +
+  geom_line(group = 1) +
+  geom_linerange(aes(ymin = mean_sw - se_sw, ymax = mean_sw + se_sw)) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10) +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Mean silhouette width")
+
+map_dfr(2:20, function(nclus){
+  data.frame(cluster = fxclus(bbdd_resid %>% select(-rowId), nclus)$cluster) %>%
+    count(cluster) %>%
+    mutate(n = 100 * (n/sum(n))) %>%
+    slice_min(n, with_ties = FALSE) %>%
+    mutate(nclus)
+}) %>%
+    ggplot(aes(nclus, n)) +
+    geom_line(group = 1) +
+    geom_point() +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+    theme_bw() +
+    labs(x = "Number of clusters", y = "Size of smallest cluster (%)")
+```
+
+```{r}
+set.seed(12345)
+mod <- GMM(data = bbdd_resid %>% select(-rowId),
+           gaussian_comps = 7,
+           em_iter = 10)
+pred <- predict_GMM(bbdd_resid %>% select(-rowId),
+                    CENTROIDS = mod$centroids,
+                    COVARIANCE = mod$covariance_matrices, 
+                    WEIGHTS = mod$weights)
+
+ggplot(bbdd_umap_50_resid %>%
+         bind_cols(cluster = as.factor(pred$cluster_labels))) +
+  geom_point(aes(x = X1, y = X2, colour = cluster)) +
+  theme_bw()
+
+ggplot(data.frame(MaxProb = apply(pred$cluster_proba, 1, max)),
+       aes(MaxProb)) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black")
+
+ggplot(data.frame(sex = 'all',
+                  prob80 = apply(pred$cluster_proba, 1, max) > 0.8),
+       aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+
+ggplot(data.frame(cluster = pred$cluster_labels) %>%
+         count(cluster, name = "size") %>%
+         mutate(prop = size / sum(size)),
+       aes(cluster, prop * 100)) +
+  geom_col(fill = "lightblue", color = "black") +
+  theme_bw() +
+  labs(x = "Cluster", y = "%")
+
+varnames <- names(bbdd_resid %>% select(-rowId))
+ggplot(data = cbind(mod$centroids %>%
+                      data.frame %>%
+                      setNames(paste0(varnames, "_mean")),
+                    mod$covariance_matrices %>%
+                      sqrt %>%
+                      data.frame %>%
+                      setNames(paste0(varnames, "_sd"))) %>%
+         tibble::rownames_to_column("component") %>%
+         pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+         mutate(sd = qnorm(1 - (0.05/2)) * sd),
+       aes(mean, component)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+  geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+  geom_point(size = 2) +
+  facet_wrap(~name, ncol = 3, scales = "free_x") +
+  theme_bw()
+```
+
+```{r, fig.width=20, fig.height=10}
+ggplot(bbdd %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                Ferritin) %>%
+         bind_cols(cluster = as.factor(pred$cluster_labels)) %>%
+         pivot_longer(-c(cluster)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(cluster, value)) +
+  geom_boxplot(aes(group = cluster, colour = cluster)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~name, scales = "free", nrow = 1) +
+  theme_bw() +
+  theme(legend.position = 'none')
+```
+
+## K-means clusters
+```{r}
+res <- Optimal_Clusters_KMeans(data = bbdd_resid %>%
+  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin),
+  max_clusters = 1:20, criterion = "BIC", max_iters = 100, plot_clusters = FALSE)
+            
+BIC_curve <- data.frame(nclus = 1:20, 
+                        BIC = as.vector(res)) 
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  labs(x = "N clusters") +
+  theme_bw()
+
+ggplot(BIC_curve %>%
+         mutate(bicgrad = abs(BIC - lag(BIC))) %>%
+         ungroup %>%
+         drop_na,
+       aes(nclus - .5, bicgrad)) +
+  geom_col(alpha = .3, color = "darkgrey") +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  labs(x = "N clusters", y = "BIC change") +
+  theme_bw()
+
+fxclus <- function(x, k){
+    mod <- KMeans_rcpp(data = x, clusters = k)
+    return(list(cluster = as.integer(mod$clusters)))
+}
+
+map_dfr(2:15, function(nclus){
+  data.frame(cluster = fxclus(bbdd_resid %>% select(-rowId),
+                              nclus)$cluster) %>%
+    count(cluster) %>%
+    mutate(n = 100 * (n/sum(n))) %>%
+    slice_min(n, with_ties = FALSE) %>%
+    mutate(nclus)
+}) %>%
+    ggplot(aes(nclus, n)) +
+    geom_line(group = 1) +
+    geom_point() +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+    theme_bw()
+```
+
+### 4 grups
+```{r}
+akm <- KMeans_rcpp(data = bbdd_resid %>%
+                     select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin),
+  clusters = 4,
+  num_init = 10,
+  fuzzy = TRUE)
+
+km_res <- bbdd_umap_50_resid %>%
+  bind_cols(km = akm$clusters) %>%
+  mutate(km = factor(km))
+
+ggplot(km_res,
+       aes(x = X1, y = X2, colour = km)) +
+  geom_point() +
+  theme_bw()
+
+ggplot(data = data.frame(MaxProb = apply(akm$fuzzy_clusters, 1, max)),
+       aes(MaxProb)) +
+  geom_histogram(bins = 10, fill = "lightblue", color = "black")
+
+ggplot(data = data.frame(sex = 'all',
+                         prob80 = apply(akm$fuzzy_clusters, 1, max) > .8),
+       aes(sex, fill = prob80)) +
+  geom_bar(stat="count", position ="fill") +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "%", fill = "MaxP > 80%")
+
+ggplot(data = data.frame(cluster = akm$clusters) %>%
+         count(cluster, name = "size") %>%
+         mutate(prop = size / sum(size)),
+       aes(cluster, prop * 100)) +
+  geom_col(fill = "lightblue", color = "black") +
+  theme_bw() +
+  labs(x = "Cluster", y = "%")
+```
+```{r, fig.width=20, fig.height=10}
+ggplot(bbdd %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin) %>%
+         bind_cols(km_res) %>%
+         pivot_longer(-c('rowId', 'sex_female', 'obesity_BMI', 'X1', 'X2', 'km')) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(x = km,
+           y = value)) +
+  geom_boxplot(aes(group = km, colour = km)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~name, scales = "free", nrow = 1) +
+  theme_bw() +
+  theme(legend.position = 'none')
+```
+
+## HDBSCAN
+No dóna bons resultats

@@ -1,0 +1,774 @@
+---
+title: "UMAP: Tota la població"
+author: "JBF"
+date: '`r Sys.time()`'
+output: 
+  html_document: 
+    toc: yes
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+# library(umap)
+library(uwot)
+library(gridExtra)
+library(ClusterR)
+library(dbscan)
+
+# Carreguem les dades
+load('/home/idiap/projects/SOPHIA_codi/data.RData')
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+  mutate_at(.vars = c('A10', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+```
+
+# Descriptiva de les variables
+## Distribució variables numèriques
+```{r}
+ggplot(bbdd_covar %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free")
+```
+
+
+## Eliminem els valors atípics
+Eliminem els valors superiors a mn +/- 5*SD
+```{r distributions, fig.width=20, fig.height=10}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+
+bbdd_covar <- bbdd_covar %>%
+  group_by(sex_female) %>% 
+  mutate(across(c('HbA1c', 'Leukocytes', 'cLDL', 'Tg', 'cHDL', 'DBP', 'SBP', 'Glucose'),
+                remove_outliers))
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI,
+                                  Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female, obesity_BMI, Current, Former,
+         ami, angor, stroke, tia,
+         A10, C01, C02, C03, C07, C08, C09, C10, M01A)
+
+options(repr.plot.width = 20)
+ggplot(bbdd %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free")
+```
+
+## Correlacions
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+         sex_female) %>%
+  group_by(sex_female) %>% 
+  group_modify(~{.x %>%
+      select(-rowId) %>%
+      cor %>%
+      reshape2::melt()
+    }) %>%
+  mutate(value = value^2) %>%
+  filter(Var1 != Var2, value > .3)
+
+options(repr.plot.width = 16)
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map(~{.x %>%
+      select(-c(rowId, sex_female)) %>%
+      cor %>%
+      reshape2::melt() %>%
+      ggplot(aes(Var1, Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                           limit = c(-1,1)) +
+      theme_minimal() +
+      labs(x = NULL, y = NULL, fill = "Correlation", main = .x$sex_female)
+  }) %>%
+  wrap_plots(nrow = 2, guides = "collect")
+```
+
+# UMAP
+Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
+```{r Non-linear_dimansionality_reduction}
+sex_labels <- bbdd %>%
+  group_split(sex_female) %>%
+  map(~.x$sex_female[1])
+
+umap_res_15 <- bbdd %>%
+  select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map(function(strat, ...){
+    umap(X = strat,
+       n_neighbors = 15,
+       metric = "manhattan",
+       min_dist = 0.001)
+  })
+map2_dfr(umap_res_15, sex_labels,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 2) +
+  theme_bw()
+
+umap_res_50 <- bbdd %>%
+  select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map(function(strat, ...){
+    umap(X = strat,
+       n_neighbors = 50,
+       metric = "manhattan",
+       min_dist = 0.001)
+  })
+map2_dfr(umap_res_50, sex_labels,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 2) +
+  theme_bw()
+```
+
+## K-means clusters
+```{r}
+BIC_curve <- bbdd %>%
+  select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_KMeans(data = strat %>% select(-sex_female), max_clusters = 1:20,
+                                   criterion = "BIC", max_iters = 100, plot_clusters = FALSE)
+    data.frame(sex_female = strat$sex_female[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+   
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+fxclus <- function(x, k){
+  mod <- KMeans_rcpp(data = x, clusters = k)
+  return(list(cluster = as.integer(mod$clusters)))
+}
+km_res <- map2_dfr(
+  map2_dfr(umap_res_50,
+           bbdd %>%
+             select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+             group_by(sex_female, .add = T) %>%
+             group_split(),
+           ~.x %>%
+             data.frame %>%
+             bind_cols(.y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split(),
+  bbdd %>%
+    select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split() %>% 
+    map(function(strat){
+      KMeans_rcpp(data = strat %>%
+                    select(-sex_female),
+                  clusters = 4,
+                  num_init = 10,
+                  fuzzy = TRUE)$clusters
+    }),
+  ~.x %>% 
+    bind_cols(km = .y)) %>%
+  mutate(km = factor(km))
+ggplot(km_res,
+       aes(x = X1, y = X2, colour = km)) +
+  geom_point() +
+  facet_grid(sex_female ~ .) +
+  theme_bw()
+
+ggplot(km_res %>%
+         pivot_longer(-c('sex_female', 'X1', 'X2', 'km')) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(x = km,
+           y = value)) +
+  geom_boxplot(aes(group = km)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~ sex_female + name, scales = "free", nrow = 2) +
+  theme_bw()
+
+BIC_curve <- map2_dfr(umap_res_50, sex_labels,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex_female = .y)) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_KMeans(data = strat %>% select(-sex_female), max_clusters = 1:20,
+                                   criterion = "BIC", max_iters = 100, plot_clusters = FALSE)
+    data.frame(sex_female = strat$sex_female[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+km_res_umap <- map2_dfr(
+  map2_dfr(umap_res_50,
+           bbdd %>%
+             select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+             group_by(sex_female, .add = T) %>%
+             group_split(),
+           ~.x %>%
+             data.frame %>%
+             bind_cols(.y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split(),
+  map2_dfr(umap_res_50, sex_labels,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex_female = .y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split() %>% 
+    map(function(strat){
+      KMeans_rcpp(data = strat %>%
+                    select(-sex_female),
+                  clusters = 4,
+                  num_init = 10,
+                  fuzzy = TRUE)$clusters
+    }),
+  ~.x %>% 
+    bind_cols(km = .y)) %>%
+  mutate(km = factor(km))
+ggplot(km_res_umap,
+       aes(x = X1, y = X2, colour = km)) +
+  geom_point() +
+  facet_grid(sex_female ~ .) +
+  theme_bw()
+ggplot(km_res_umap %>%
+         pivot_longer(-c('sex_female', 'X1', 'X2', 'km')) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(x = km,
+           y = value)) +
+  geom_boxplot(aes(group = km)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~ sex_female + name, scales = "free", nrow = 2) +
+  theme_bw()
+```
+
+<!-- ##HDBSCAN -->
+<!-- ```{r} -->
+<!-- cl <- map2_dfr( -->
+<!--   map2_dfr(umap_res_50, -->
+<!--            bbdd %>% -->
+<!--              select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>% -->
+<!--              group_by(sex_female, .add = T) %>% -->
+<!--              group_split(), -->
+<!--            ~.x %>% -->
+<!--              data.frame %>% -->
+<!--              bind_cols(.y)) %>% -->
+<!--     group_by(sex_female, .add = T) %>% -->
+<!--     group_split(), -->
+<!--   bbdd %>% -->
+<!--     select(sex_female, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%  -->
+<!--     group_by(sex_female, .add = T) %>% -->
+<!--     group_split() %>% -->
+<!--     map(function(strat){ -->
+<!--       hdbscan(x = strat %>% select(-sex_female), -->
+<!--               minPts = 5) -->
+<!--     }), -->
+<!--   ~.x %>% -->
+<!--     bind_cols(hdbscan = .y$cluster)) %>%  -->
+<!--   mutate(hdbscan = factor(hdbscan)) -->
+
+<!-- ggplot(cl, -->
+<!--        aes(x = X1, y = X2, colour = hdbscan)) + -->
+<!--   geom_point() + -->
+<!--   facet_grid(sex_female ~ .) + -->
+<!--   theme_bw() -->
+
+<!-- ggplot(cl %>%  -->
+<!--          pivot_longer(-c('sex_female', 'X1', 'X2', 'hdbscan')) %>% -->
+<!--          group_by(name) %>% -->
+<!--          mutate(mval = mean(value)) %>% -->
+<!--          ungroup, -->
+<!--        aes(x = hdbscan, -->
+<!--            y = value)) + -->
+<!--   geom_boxplot(aes(group = hdbscan)) + -->
+<!--   geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") + -->
+<!--   facet_wrap(~ sex_female + name, scales = "free", nrow = 2) + -->
+<!--   theme_bw() -->
+
+<!-- cl_umap <- hdbscan(bbdd_umap_50 %>% select(X1, X2), -->
+<!--                    minPts = 100) -->
+
+<!-- cl_umap_res <- bbdd_umap_50 %>% -->
+<!--   bind_cols(hdbscan = cl_umap$cluster) %>% -->
+<!--   mutate(hdbscan = factor(hdbscan)) -->
+<!-- ggplot(cl_umap_res, -->
+<!--        aes(x = X1, y = X2, colour = hdbscan)) + -->
+<!--   geom_point() + -->
+<!--   theme(legend.position = 'none') + -->
+<!--   theme_bw() -->
+
+<!-- ggplot(bbdd %>% -->
+<!--          select(age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>% -->
+<!--          bind_cols(cl_umap_res) %>% -->
+<!--          pivot_longer(-c('rowId', 'sex_female', 'obesity_BMI', 'X1', 'X2', 'hdbscan')) %>% -->
+<!--          group_by(name) %>% -->
+<!--          mutate(mval = mean(value)) %>% -->
+<!--          ungroup, -->
+<!--        aes(x = hdbscan, -->
+<!--            y = value)) + -->
+<!--   geom_boxplot(aes(group = hdbscan)) + -->
+<!--   geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") + -->
+<!--   facet_wrap(~name, scales = "free", nrow = 1) + -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
+
+# UMAP with residualized
+```{r residualization}
+bbdd_resid <- bbdd %>%
+  mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09)) %>% 
+  group_by(sex_female) %>%
+  group_modify(~{
+    .x %>% 
+    transmute(rowId,
+              across(c("HbA1c", "Leukocytes", "cLDL", "Tg", "cHDL", "DBP",
+                       "SBP", "Glucose"),
+                     function(v,...){
+                       dd <- data.frame(vcol = v, a = age, b = BMI, c = Current,
+                                        d = Former, e = A10, f = C10)
+                       lm(vcol ~ a + b + c + d + e + f, data = dd) %>%
+                         resid %>% scale %>% as.vector
+                      }))
+    }) %>%
+  ungroup
+
+ggplot(bbdd_resid %>%
+         pivot_longer(-c(rowId, sex_female)),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free")
+```
+
+# UMAP
+Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
+```{r umap_resid}
+sex_labels_resid <- bbdd_resid %>%
+  group_split(sex_female) %>%
+  map(~.x$sex_female[1])
+
+umap_res_15_resid <- bbdd_resid %>%
+  select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map(function(strat, ...){
+    umap(X = strat,
+       n_neighbors = 15,
+       metric = "manhattan",
+       min_dist = 0.001)
+  })
+map2_dfr(umap_res_15_resid, sex_labels_resid,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 2) +
+  theme_bw()
+
+umap_res_50_resid <- bbdd_resid %>%
+  select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map(function(strat, ...){
+    umap(X = strat,
+       n_neighbors = 50,
+       metric = "manhattan",
+       min_dist = 0.001)
+  })
+map2_dfr(umap_res_50_resid, sex_labels_resid,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex = .y)) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(alpha = .1) +
+  facet_wrap(~sex, nrow = 2) +
+  theme_bw()
+```
+
+## K-means clusters
+```{r}
+BIC_curve <- bbdd_resid %>%
+  select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_KMeans(data = strat %>% select(-sex_female), max_clusters = 1:20,
+                                   criterion = "BIC", max_iters = 100, plot_clusters = FALSE)
+    data.frame(sex_female = strat$sex_female[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+   
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+km_res_resid <- map2_dfr(
+  map2_dfr(umap_res_50_resid,
+           bbdd_resid %>%
+             select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+             group_by(sex_female, .add = T) %>%
+             group_split(),
+           ~.x %>%
+             data.frame %>%
+             bind_cols(.y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split(),
+  bbdd_resid %>%
+    select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split() %>% 
+    map(function(strat){
+      KMeans_rcpp(data = strat %>%
+                    select(-sex_female),
+                  clusters = 4,
+                  num_init = 10,
+                  fuzzy = TRUE)$clusters
+    }),
+  ~.x %>% 
+    bind_cols(km = .y)) %>%
+  mutate(km = factor(km))
+ggplot(km_res_resid,
+       aes(x = X1, y = X2, colour = km)) +
+  geom_point() +
+  facet_grid(sex_female ~ .) +
+  theme_bw()
+
+ggplot(km_res_resid %>%
+         pivot_longer(-c('sex_female', 'X1', 'X2', 'km')) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(x = km,
+           y = value)) +
+  geom_boxplot(aes(group = km)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~ sex_female + name, scales = "free", nrow = 2) +
+  theme_bw()
+
+BIC_curve <- map2_dfr(umap_res_50_resid, sex_labels_resid,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex_female = .y)) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_KMeans(data = strat %>% select(-sex_female), max_clusters = 1:20,
+                                   criterion = "BIC", max_iters = 100, plot_clusters = FALSE)
+    data.frame(sex_female = strat$sex_female[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+
+km_res_umap_resid <- map2_dfr(
+  map2_dfr(umap_res_50_resid,
+           bbdd_resid %>%
+             select(sex_female, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+             group_by(sex_female, .add = T) %>%
+             group_split(),
+           ~.x %>%
+             data.frame %>%
+             bind_cols(.y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split(),
+  map2_dfr(umap_res_50_resid, sex_labels_resid,
+         ~.x %>%
+           data.frame %>%
+           mutate(sex_female = .y)) %>%
+    group_by(sex_female, .add = T) %>%
+    group_split() %>% 
+    map(function(strat){
+      KMeans_rcpp(data = strat %>%
+                    select(-sex_female),
+                  clusters = 4,
+                  num_init = 10,
+                  fuzzy = TRUE)$clusters
+    }),
+  ~.x %>% 
+    bind_cols(km = .y)) %>%
+  mutate(km = factor(km))
+ggplot(km_res_umap_resid,
+       aes(x = X1, y = X2, colour = km)) +
+  geom_point() +
+  facet_grid(sex_female ~ .) +
+  theme_bw()
+ggplot(km_res_umap_resid %>%
+         pivot_longer(-c('sex_female', 'X1', 'X2', 'km')) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup,
+       aes(x = km,
+           y = value)) +
+  geom_boxplot(aes(group = km)) +
+  geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+  facet_wrap(~ sex_female + name, scales = "free", nrow = 2) +
+  theme_bw()
+```
+
+<!-- ##HDBSCAN -->
+<!-- ```{r} -->
+<!-- cl <- hdbscan(bbdd_resid %>% -->
+<!--                 select(HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose), -->
+<!--               minPts = 5) -->
+
+<!-- cl_res <- bbdd_umap_50_resid %>% -->
+<!--   bind_cols(hdbscan = cl$cluster) %>% -->
+<!--   mutate(hdbscan = factor(hdbscan)) -->
+<!-- ggplot(cl_res, -->
+<!--        aes(x = X1, y = X2, colour = hdbscan)) + -->
+<!--   geom_point() + -->
+<!--   theme_bw() -->
+<!-- ggplot(bbdd %>% -->
+<!--          select(age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>% -->
+<!--          bind_cols(cl_res) %>% -->
+<!--          pivot_longer(-c('rowId', 'sex_female', 'obesity_BMI', 'X1', 'X2', 'hdbscan')) %>% -->
+<!--          group_by(name) %>% -->
+<!--          mutate(mval = mean(value)) %>% -->
+<!--          ungroup, -->
+<!--        aes(x = hdbscan, -->
+<!--            y = value)) + -->
+<!--   geom_boxplot(aes(group = hdbscan)) + -->
+<!--   geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") + -->
+<!--   facet_wrap(~name, scales = "free", nrow = 1) + -->
+<!--   theme_bw() -->
+
+<!-- cl_umap <- hdbscan(bbdd_umap_50_resid %>% -->
+<!--                      select(X1, X2), -->
+<!--                    minPts = 50) -->
+
+<!-- cl_umap_res <- bbdd_umap_50 %>% -->
+<!--   bind_cols(hdbscan = cl_umap$cluster) %>% -->
+<!--   mutate(hdbscan = factor(hdbscan)) -->
+<!-- ggplot(cl_umap_res, -->
+<!--        aes(x = X1, y = X2, colour = hdbscan)) + -->
+<!--   geom_point() + -->
+<!--   theme(legend.position = 'none') + -->
+<!--   theme_bw() -->
+
+<!-- ggplot(bbdd %>% -->
+<!--          select(age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>% -->
+<!--          bind_cols(cl_umap_res) %>% -->
+<!--          pivot_longer(-c('rowId', 'sex_female', 'obesity_BMI', 'X1', 'X2', 'hdbscan')) %>% -->
+<!--          group_by(name) %>% -->
+<!--          mutate(mval = mean(value)) %>% -->
+<!--          ungroup, -->
+<!--        aes(x = hdbscan, -->
+<!--            y = value)) + -->
+<!--   geom_boxplot(aes(group = hdbscan)) + -->
+<!--   geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") + -->
+<!--   facet_wrap(~name, scales = "free", nrow = 1) + -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
+<!-- ```{r stratification} -->
+<!-- strat_dat <- bbdd %>% -->
+<!--   # select(rowId, age, BMI, HbA1c, Leukocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, -->
+<!--   #        sex_female, obesity_BMI) %>% -->
+<!--   group_by(sex_female, obesity_BMI) %>% -->
+<!--   # mutate_at(.vars = c('HbA1c', 'Leukocytes', 'cLDL', 'Tg', 'cHDL', 'DBP', 'SBP', 'Glucose'), -->
+<!--   #           scale) %>%  -->
+<!--   group_modify(~{.x %>% -->
+<!--       transmute(rowId, -->
+<!--                 across(-c(rowId, age, BMI, -->
+<!--                           Current, Former, -->
+<!--                           ami, angor, stroke, tia, -->
+<!--                           A10, C01, C02, C03, C07, C08, C09, C10, M01A), -->
+<!--                        function(v,...){ -->
+<!--                          dd <- data.frame(vcol = v, a = .x$age, b = .x$BMI, -->
+<!--                                           c = .x$Current, d = .x$Former, -->
+<!--                                           e = .x$A10) -->
+<!--                          lm(vcol ~ a + b + c + d + e, data = dd) %>% -->
+<!--                            resid %>% scale %>% as.vector -->
+<!--                          })) -->
+<!--     }) %>% -->
+<!--   ungroup -->
+
+<!-- strat_dat %>% -->
+<!--   count(sex_female, obesity_BMI) -->
+<!-- ``` -->
+
+<!-- ```{r distribuitions_after_trandformation, fig.width=20, fig.height=10} -->
+<!-- options(repr.plot.width = 20) -->
+<!-- strat_dat %>% -->
+<!--   pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>% -->
+<!--   ggplot(aes(value)) + -->
+<!--   geom_histogram(bins = 50) + -->
+<!--   facet_grid(sex_female + obesity_BMI ~ name, scales = "free") -->
+<!-- ``` -->
+
+<!-- ```{r correlations_after_transf, fig.width=12, fig.height=5} -->
+<!-- strat_dat %>% -->
+<!--   group_by(sex_female, obesity_BMI) %>% -->
+<!--   group_modify(~{.x %>% -->
+<!--       select(-rowId) %>% -->
+<!--       cor %>% -->
+<!--       reshape2::melt() -->
+<!--     }) %>% -->
+<!--   mutate(value = value^2) %>% -->
+<!--   filter(Var1 != Var2, value > .3) -->
+
+<!-- options(repr.plot.width = 16) -->
+<!-- strat_dat %>% -->
+<!--   group_split(sex_female, obesity_BMI) %>% -->
+<!--   map(~{.x %>% -->
+<!--       select(-c(rowId, sex_female, obesity_BMI)) %>% -->
+<!--       cor %>% -->
+<!--       reshape2::melt() %>% -->
+<!--       ggplot(aes(Var1, Var2, fill = value)) + -->
+<!--       geom_tile() + -->
+<!--       scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, -->
+<!--                            limit = c(-1,1)) + -->
+<!--       theme_minimal() + -->
+<!--       labs(x = NULL, y = NULL, fill = "Correlation") -->
+<!--     }) %>% -->
+<!--   wrap_plots(nrow = 2, guides = "collect") -->
+<!-- ``` -->
+
+<!-- <!-- ```{r linear_dimensionality_reduction} --> -->
+<!-- <!-- options(repr.plot.width = 8, repr.plot.height = 4, repr.plot.res = 180) --> -->
+<!-- <!-- pca_res <- strat_dat %>% --> -->
+<!-- <!--   split(~ sex_female + obesity_BMI) %>% --> -->
+<!-- <!--   map(~.x %>% select(-c(rowId, sex_female, obesity_BMI)) %>% prcomp) --> -->
+<!-- <!-- ``` --> -->
+
+<!-- <!-- ```{r variance_explained} --> -->
+<!-- <!-- pca_res %>% --> -->
+<!-- <!--   imap(~{eigs <- .x$sdev^2 --> -->
+<!-- <!--   varexp <- round(eigs / sum(eigs), 4) --> -->
+<!-- <!--   data.frame(ncomp = 1:length(varexp), ve = 100 * varexp) %>% --> -->
+<!-- <!--     mutate(ve_cs = cumsum(ve)) %>% --> -->
+<!-- <!--     ggplot(aes(ncomp, ve_cs)) + --> -->
+<!-- <!--     geom_area(fill = "lightblue", alpha = .5) + --> -->
+<!-- <!--     geom_line(group = 1) + --> -->
+<!-- <!--     geom_point() +  --> -->
+<!-- <!--     geom_hline(yintercept = 95, linetype = "dashed", color = "red") + --> -->
+<!-- <!--     scale_x_continuous(breaks = 1:length(varexp)) + --> -->
+<!-- <!--     theme_bw() + --> -->
+<!-- <!--     labs(title = .y, x = NULL, y = NULL) --> -->
+<!-- <!--   }) %>% --> -->
+<!-- <!--   modify_at(1, ~.x + labs(y = "Cumulative % variance explained")) %>% --> -->
+<!-- <!--   wrap_plots(nrow = 2) %>% --> -->
+<!-- <!--   wrap_plots(grid::textGrob("Number of components"), ncol = 1, heights = c(.99, .01)) --> -->
+<!-- <!-- ``` --> -->
+
+<!-- <!-- ```{r scatter_plot_PCA} --> -->
+<!-- <!-- pca_res %>% --> -->
+<!-- <!--   imap(~{eigs <- .x$sdev^2 --> -->
+<!-- <!--   varexp <- round(eigs / sum(eigs), 4) --> -->
+<!-- <!--   .x %>% --> -->
+<!-- <!--     "$"("x") %>% --> -->
+<!-- <!--     "["(,c(1,2)) %>% --> -->
+<!-- <!--     data.frame %>% --> -->
+<!-- <!--     ggplot(aes(PC1, PC2)) + --> -->
+<!-- <!--     geom_point(alpha = .1) + --> -->
+<!-- <!--     theme_bw() + --> -->
+<!-- <!--     labs(title = .y, --> -->
+<!-- <!--          x = paste0("PC1 (", varexp[1] * 100, "%)"), --> -->
+<!-- <!--          y = paste0("PC2 (", varexp[2] * 100, "%)")) --> -->
+<!-- <!--   }) %>% --> -->
+<!-- <!--   wrap_plots(nrow = 2) --> -->
+<!-- <!-- ``` --> -->
+
+
+
+<!-- ```{r } -->
+<!-- sampsize <- 1000 -->
+<!-- custom.config$n_neighbors <- sqrt(sampsize)*2 -->
+<!-- custom.config$min_dist <- 0.01 -->
+<!-- umap_res2 <- strat_dat %>% -->
+<!--   group_split(sex_female, obesity_BMI) %>% -->
+<!--   map(function(strat, ...){ -->
+<!--     map(1:5, -->
+<!--         function(iter){ -->
+<!--           strat %>% -->
+<!--             select(-c(rowId, sex_female, obesity_BMI)) %>% -->
+<!--             sample_n(sampsize) %>% -->
+<!--             umap(config = custom.config) -->
+<!--           }) -->
+<!--     }) -->
+
+<!-- options(repr.plot.width = 8, repr.plot.height = 12, repr.plot.res = 180) -->
+<!-- map2_dfr(umap_res2, sex_labels, -->
+<!--          ~.x %>% -->
+<!--            map_dfr(function(iter, ...){ -->
+<!--              iter$layout %>%  -->
+<!--                data.frame -->
+<!--              }, -->
+<!--              .id = "iter") %>% -->
+<!--            mutate(sex = .y)) %>% -->
+<!--   ggplot(aes(X1, X2)) + -->
+<!--   geom_point(alpha = .1) + -->
+<!--   facet_grid(iter~sex) + -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
