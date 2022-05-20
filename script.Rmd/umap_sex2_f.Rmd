@@ -318,6 +318,7 @@ bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
 
 ggplot(bbdd_umap_50_resid) +
   geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
   theme_bw()
 
 gmm_res %>%
@@ -534,6 +535,7 @@ bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
 
 ggplot(bbdd_umap_50_resid) +
   geom_point(aes(x = X1, y = X2, colour = cluster_km)) +
+  facet_grid(. ~ sex) +
   theme_bw()
 
 km_res %>%

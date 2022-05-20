@@ -64,11 +64,11 @@ n_cohort <- createCohort(cdm_bbdd,
                          cohortTable,
                          cohortDefinitionSet)
 
-fet_diag <- runDiagnostic(cdm_bbdd,
-                          cdm_schema,
-                          results_sc,
-                          cohortTable,
-                          cohortDefinitionSet)
+# fet_diag <- runDiagnostic(cdm_bbdd,
+#                           cdm_schema,
+#                           results_sc,
+#                           cohortTable,
+#                           cohortDefinitionSet)
 # CohortDiagnostics::launchDiagnosticsExplorer(dataFolder = paste0('~idiap/projects/SOPHIA_codi/',exportFolder),
 #                                              dataFile = "Premerged.RData")
 
@@ -113,5 +113,18 @@ cov_num_resum <- covariateData2$covariateRef %>%
 save(cov_cate_resum,
      cov_num_resum,
      file = 'taules_desc.RData')
+
+name_html <- c('umap_all', 'umap_all_f', 'umap_sex2', 'umap_sex2_f', 'umap_obesity2', 'umap_obesity2_f')
+for (.name in name_html){
+  # IN <- sprintf('script.Rmd/%s.Rmd', .name)
+  IN <- sprintf('%s.Rmd', .name)
+  OUT <- sprintf('www/%s.html', .name)
+  .PATH = sprintf('.tmp/%s', strsplit(x=basename(OUT), split="\\.")[[1]][1])
+  dir.create(.PATH, showWarnings = F, recursive= T)
+  file.copy(from=IN, to=.PATH, overwrite=T)
+  rmarkdown::render(input=paste(.PATH,basename(IN),sep="/"),
+                    output_dir=dirname(OUT),
+                    output_file=basename(OUT), clean=T)
+}
 
 disconnect(cdm_bbdd)
