@@ -2,10 +2,7 @@
 title: "UMAP: Tota la població"
 author: "JBF"
 date: '`r Sys.time()`'
-output: 
-  html_document: 
-    toc: yes
-    toc_float: true
+output: html_document
 ---
 
 ```{r setup, include = FALSE}
@@ -23,12 +20,13 @@ library(splines)
 # library(dbscan)
 
 # Carreguem les dades
-load('/home/idiap/projects/SOPHIA_codi/data.RData')
+# load('/home/idiap/projects/SOPHIA_codi/data.RData')
 bbdd_covar <- bbdd_covar %>%
   mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
          obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
          sex_female = factor(sex_female, labels = c('Men', 'Women')),
-         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity')),
+         TimeT2DM = TimeT2DM/365.25) %>% 
   mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
             function(x) if_else(is.na(x), 0, x))
 ```
@@ -38,11 +36,11 @@ bbdd_covar <- bbdd_covar %>%
 ```{r}
 ggplot(bbdd_covar %>%
          select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
-                Ferritin, sex_female, obesity_BMI) %>%
+                TimeT2DM, Ferritin, sex_female, obesity_BMI) %>%
          pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(obesity_BMI ~ name, scales = "free")
@@ -63,27 +61,28 @@ remove_outliers <- function(x){
 bbdd_covar <- bbdd_covar %>%
   group_by(obesity_BMI) %>% 
   mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose',
-                  'Ferritin'),
+                  'TimeT2DM', 'Ferritin'),
                 remove_outliers))
   
 ind_cc <- complete.cases(bbdd_covar %>%
-                           select(rowId, age, HbA1c, BMI, Ferritin,
+                           select(rowId, age, HbA1c, BMI, TimeT2DM, Ferritin,
                                   Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
 #, HbA1c
 bbdd <- bbdd_covar[ind_cc,] %>%
   select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
-         Ferritin, sex_female, obesity_BMI, Current, Former,
+         TimeT2DM, Ferritin, sex_female, obesity_BMI, Current, Former,
          ami, angor, stroke, tia,
          A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
 
 options(repr.plot.width = 20)
 ggplot(bbdd %>%
          select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
-                Ferritin, sex_female, obesity_BMI) %>%
+                TimeT2DM, Ferritin, sex_female, obesity_BMI) %>%
          pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM',
+                                         'Ferritin'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(obesity_BMI ~ name, scales = "free")
@@ -92,8 +91,8 @@ ggplot(bbdd %>%
 ## Correlacions
 ```{r correlations, fig.width=12, fig.height=5}
 bbdd %>%
-  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin,
-         obesity_BMI) %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+         Ferritin, obesity_BMI) %>%
   group_by(obesity_BMI) %>% 
   group_modify(~{.x %>%
       cor %>%
@@ -104,8 +103,8 @@ bbdd %>%
 
 options(repr.plot.width = 16)
 bbdd %>%
-  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin,
-         obesity_BMI) %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+         Ferritin, obesity_BMI) %>%
   group_by(obesity_BMI, .add = T) %>%
   group_split() %>% 
   map(~{.x %>%
@@ -131,7 +130,7 @@ bbdd_resid <- bbdd %>%
     .x %>% 
     transmute(rowId,
               across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg",
-                       "DBP", "SBP", 'Ferritin'),
+                       "DBP", "SBP", "TimeT2DM", 'Ferritin'),
                      function(v,...){
                        dd <- data.frame(vcol = v, a = age, s = sex_female, b = BMI, c = Current,
                                         d = Former, a10a = A10A, a10b = A10B, f = C10, g = HTA_med)
@@ -150,7 +149,7 @@ ggplot(bbdd_resid %>%
          pivot_longer(-c(rowId, obesity_BMI)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(obesity_BMI ~ name, scales = "free")
@@ -164,7 +163,8 @@ sex_labels_resid <- bbdd_resid %>%
   map(~.x$obesity_BMI[1])
 
 umap_resid_50 <- bbdd_resid %>%
-  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin, obesity_BMI) %>%
+  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         obesity_BMI) %>%
   group_by(obesity_BMI, .add = T) %>%
   group_split() %>% 
   map(function(strat, ...){
@@ -352,8 +352,8 @@ gmm_res %>%
 
 gmm_res %>%
   map2(bbdd %>%
-         select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin,
-                obesity_BMI) %>%
+         select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+                Ferritin, obesity_BMI) %>%
          group_by(obesity_BMI, .add = T) %>%
          group_split(),
        function(strata, data){
@@ -382,8 +382,8 @@ gmm_res %>%
 
 ```{r, fig.width=20, fig.height=10}
 bbdd %>%
-  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin,
-         obesity_BMI) %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+         Ferritin, obesity_BMI) %>%
   group_by(obesity_BMI, .add = T) %>%
   group_split() %>%
   map2(bbdd_umap_50_resid %>%
@@ -397,7 +397,8 @@ bbdd %>%
          ungroup %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))) %>%
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM',
+                                         'Ferritin'))) %>%
          ggplot(aes(cluster_gmm, value)) +
          geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
          geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
@@ -568,8 +569,8 @@ km_res %>%
 
 ```{r, fig.width=20, fig.height=10}
 bbdd %>%
-  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, Ferritin,
-         obesity_BMI) %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+         Ferritin, obesity_BMI) %>%
   group_by(obesity_BMI, .add = T) %>%
   group_split() %>%
   map2(bbdd_umap_50_resid %>%
@@ -583,7 +584,8 @@ bbdd %>%
          ungroup %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Ferritin'))) %>%
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM',
+                                         'Ferritin'))) %>%
          ggplot(aes(cluster_km, value)) +
          geom_boxplot(aes(group = cluster_km, colour = cluster_km)) +
          geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +

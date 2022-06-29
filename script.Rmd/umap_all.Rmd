@@ -23,12 +23,13 @@ library(splines)
 # library(dbscan)
 
 # Carreguem les dades
-load('/home/idiap/projects/SOPHIA_codi/data.RData')
+# load('/home/idiap/projects/SOPHIA_codi/data.RData')
 bbdd_covar <- bbdd_covar %>%
   mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
          obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
          sex_female = factor(sex_female, labels = c('Men', 'Women')),
-         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity'))) %>% 
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity')),
+         TimeT2DM = TimeT2DM/365.25) %>% 
   mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
             function(x) if_else(is.na(x), 0, x))
 ```
@@ -37,12 +38,12 @@ bbdd_covar <- bbdd_covar %>%
 ## Distribució variables numèriques
 ```{r}
 ggplot(bbdd_covar %>%
-         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
-                sex_female, obesity_BMI) %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, 
+                TimeT2DM, sex_female, obesity_BMI) %>%
          pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(. ~ name, scales = "free")
@@ -61,15 +62,17 @@ remove_outliers <- function(x){
 }
 
 bbdd_covar <- bbdd_covar %>%
-  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose'),
+  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose', 
+                  'TimeT2DM'),
                 remove_outliers))
   
 ind_cc <- complete.cases(bbdd_covar %>%
-                           select(rowId, age, HbA1c, BMI,
+                           select(rowId, age, HbA1c, BMI, TimeT2DM,
                                   Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
 #, HbA1c
 bbdd <- bbdd_covar[ind_cc,] %>%
   select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
+         TimeT2DM, 
          sex_female, obesity_BMI, Current, Former,
          ami, angor, stroke, tia,
          A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
@@ -77,20 +80,20 @@ bbdd <- bbdd_covar[ind_cc,] %>%
 options(repr.plot.width = 20)
 ggplot(bbdd %>%
          select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
-                sex_female, obesity_BMI) %>%
+                TimeT2DM, sex_female, obesity_BMI) %>%
          pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(. ~ name, scales = "free")
 ```
 
 ## Correlacions
-```{r correlations, fig.width=12, fig.height=5}
+```{r correlations, fig.width=12, fig.height=12}
 bbdd %>%
-  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM) %>%
   cor %>%
   reshape2::melt() %>%
   mutate(value = value^2) %>%
@@ -98,7 +101,7 @@ bbdd %>%
 
 options(repr.plot.width = 16)
 ggplot(bbdd %>%
-         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM) %>%
          cor %>%
          reshape2::melt(),
        aes(Var1, Var2, fill = value)) +
@@ -460,7 +463,8 @@ knots_BMI <- quantile(x = bbdd$BMI,
 bbdd_resid <- bbdd %>%
   mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09)) %>% 
   transmute(rowId,
-            across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg", "DBP", "SBP"),
+            across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg", "DBP", "SBP",
+                     'TimeT2DM'),
                    function(v,...){
                      
                      dd <- data.frame(vcol = v, s = sex_female, a = age, b = BMI, c = Current,
@@ -475,7 +479,7 @@ ggplot(bbdd_resid %>%
          pivot_longer(-c(rowId)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))),
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM'))),
        aes(value)) +
   geom_histogram(bins = 50) +
   facet_grid(. ~ name, scales = "free")
@@ -485,7 +489,7 @@ ggplot(bbdd_resid %>%
 Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
 ```{r umap_resid}
 umap_resid_50 <- bbdd_resid %>%
-  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>% 
+  select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM) %>% 
   umap(X = .,
        n_neighbors = 50,
        metric = "manhattan",
@@ -655,12 +659,12 @@ ggplot(data = cbind(mod$centroids %>%
 
 ```{r, fig.width=20, fig.height=10}
 ggplot(bbdd %>%
-         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM) %>%
          bind_cols(cluster = as.factor(pred$cluster_labels)) %>%
          pivot_longer(-c(cluster)) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))) %>%
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM'))) %>%
          group_by(name) %>%
          mutate(mval = mean(value)) %>%
          ungroup,
@@ -721,7 +725,7 @@ map_dfr(2:15, function(nclus){
     theme_bw()
 ```
 
-### 5 grups
+### 4 grups
 ```{r}
 akm <- KMeans_rcpp(data = bbdd_resid %>%
                      select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose),
@@ -760,12 +764,12 @@ ggplot(data = data.frame(cluster = akm$clusters) %>%
 ```
 ```{r, fig.width=20, fig.height=10}
 ggplot(bbdd %>%
-         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose) %>%
+         select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM) %>%
          bind_cols(km_res) %>%
          pivot_longer(-c('rowId', 'sex_female', 'obesity_BMI', 'X1', 'X2', 'km')) %>%
          mutate(name = factor(name,
                               levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
-                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP'))) %>%
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM'))) %>%
          group_by(name) %>%
          mutate(mval = mean(value)) %>%
          ungroup,
