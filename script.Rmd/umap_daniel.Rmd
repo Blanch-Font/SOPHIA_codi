@@ -198,10 +198,27 @@ strat_dat <- recoded_dat %>%
   })
 
 strat_dat <- map2(strat_dat, recoded_dat %>% split(f = .$sex), ~{
-  .y <- .y %>%
-    mutate(crp = if_else(is.na(crp), 0, crp))
+  y_cc <- .y %>%
+    select(eid, crp, age, smoking, bmi) %>%
+    drop_na
+  ay_cc <- lm(formula = crp ~ age + smoking + bmi,
+              data = y_cc) %>% 
+    resid %>%
+    scale %>%
+    data.frame %>% 
+    setNames('crp_nou')
+  y_cc <- y_cc %>% 
+    bind_cols(ay_cc)
+  # .y <- .y %>%
+  #   left_join(y_cc %>%
+  #               select(eid, crp_nou),
+  #             by = 'eid') %>%
+  #   mutate(crp_nou = if_else(is.na(crp_nou), 0, crp_nou))
   .x %>%
-    left_join(.y %>% select(eid, crp))
+    left_join(y_cc %>%
+                select(eid, crp = crp_nou),
+              by = 'eid') %>%
+    mutate(crp = if_else(is.na(crp), 0, crp))
 })
 ```
 
@@ -473,5 +490,42 @@ umap_embed %>%
   facet_wrap(~sex, nrow = 1) +
   theme_bw() +
   labs(x = "UMAP1", y = "UMAP2", color = "Archetypes")
+```
+
+## Overlaying prevalent diseases
+```{r}
+umap_disease <- umap_embed %>%
+  map2(.y = bbdd_covar %>%
+         rename(eid = rowId) %>% 
+         mutate(sex = if_else(sex_female == 1, 'Female', 'Male')) %>%
+         split(f = .$sex), ~{
+    .x %>%
+      left_join(.y,
+                by = 'eid')
+  })
+umap_disease %>%
+    imap(~{
+      .x %>%
+        tidyr::pivot_longer(c("angor", "tia", "stroke", "ami", "COPD", "CKD", "cancer", "depress",
+                              "htn", "hf", "liver", "ra", "sleep_apnea", "pcos"),
+                            names_to = "Disease",
+                            values_to = "Diagnosis") %>%
+        mutate(Disease = gsub("_", " ", Disease),
+               Diagnosis = ifelse(Diagnosis == 1, "Yes", "No")) %>%
+        ggplot(aes(X1, X2)) +
+        geom_point(aes(color = Diagnosis, 
+                       shape = ifelse(Diagnosis == "Yes", "*", "."),
+                       alpha = ifelse(Diagnosis == "Yes", .5, .1)),
+                   na.rm = TRUE) +
+        scale_shape_identity() +
+        scale_alpha_identity() +
+        scale_color_manual(values = c("grey", "red")) +
+        guides(color = guide_legend(override.aes = list(alpha = 1))) +
+        geom_point(data = archdat_umap[[.y]], aes(fill = archnam), shape = 23, size = 3) +
+        facet_wrap(~Disease, nrow = 2) +
+        theme_bw() +
+        labs(title = .x$sex[1], x = "UMAP1", y = "UMAP2", fill = paste("Archetypes -", .y))
+    }) %>%
+  patchwork::wrap_plots(ncol = 1, guides = "collect")
 ```
 

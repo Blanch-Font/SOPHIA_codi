@@ -142,23 +142,23 @@ save(cov_cate_resum_T2DM,
      file = 'taules_desc_T2DM.RData')
 
 bbdd_covar_T2DM <- transformToFlat(covariateData_T2DM)
-# bbdd_covar <- bbdd_covar_T2DM
-# IN <- 'umap_daniel.Rmd'
-# OUT <- 'umap_daniel_T2DM.html'
-# .PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
-# dir.create(.PATH, showWarnings = F, recursive = T)
-# file.copy(from = IN, to = .PATH, overwrite = T)
-# rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
-#                   output_dir = dirname(OUT),
-#                   output_file = basename(OUT),
-#                   clean = T)
-#
+bbdd_covar <- bbdd_covar_T2DM
+IN <- 'umap_daniel.Rmd'
+OUT <- 'umap_daniel_T2DM.html'
+.PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
+dir.create(.PATH, showWarnings = F, recursive = T)
+file.copy(from = IN, to = .PATH, overwrite = T)
+rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
+                  output_dir = dirname(OUT),
+                  output_file = basename(OUT),
+                  clean = T)
+
 ###################################################################################################
 covariateData_T1DM <- buildData(cdm_bbdd,
                                 cdm_schema,
                                 results_sc,
                                 cohortTable,
-                                acohortId = 3)
+                                acohortId = 2)
 covariateData2_T1DM <- FeatureExtraction::aggregateCovariates(covariateData_T1DM)
 
 cov_cate_resum_T1DM <- covariateData2_T1DM$covariateRef %>%
@@ -185,16 +185,16 @@ save(cov_cate_resum_T1DM,
      file = 'taules_desc_T1DM.RData')
 
 bbdd_covar_T1DM <- transformToFlat(covariateData_T1DM)
-# bbdd_covar <- bbdd_covar_T1DM
-# IN <- 'umap_daniel.Rmd'
-# OUT <- 'umap_daniel_T1DM.html'
-# .PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
-# dir.create(.PATH, showWarnings = F, recursive = T)
-# file.copy(from = IN, to = .PATH, overwrite = T)
-# rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
-#                   output_dir = dirname(OUT),
-#                   output_file = basename(OUT),
-#                   clean = T)
+bbdd_covar <- bbdd_covar_T1DM
+IN <- 'umap_daniel.Rmd'
+OUT <- 'umap_daniel_T1DM.html'
+.PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
+dir.create(.PATH, showWarnings = F, recursive = T)
+file.copy(from = IN, to = .PATH, overwrite = T)
+rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
+                  output_dir = dirname(OUT),
+                  output_file = basename(OUT),
+                  clean = T)
 #
 # name_html <- c('umap_all', 'umap_all_f', 'umap_sex2', 'umap_sex2_f', 'umap_obesity2', 'umap_obesity2_f')
 # for (.name in name_html){
