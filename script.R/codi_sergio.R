@@ -10,10 +10,10 @@ library(SOPHIA)
 library(DatabaseConnector)
 library(magrittr)
 # library(Andromeda)
-# library(purrr)
-# library(uwot)
-# umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
-#                 ~load_uwot(paste0("umap_model_", .x)))
+library(purrr)
+library(uwot)
+umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
+                ~load_uwot(paste0("umap_model_", .x)))
 
 Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "data/jdbcDrivers/")
 

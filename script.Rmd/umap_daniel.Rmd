@@ -14,7 +14,7 @@ library(tidyr)
 library(patchwork)
 library(purrr)
 # library(umap)
-library(uwot)
+# library(uwot)
 library(gridExtra)
 library(ClusterR)
 library(splines)
@@ -59,7 +59,7 @@ bbdd_umap <- bbdd_covar %>%
 bbdd_umap %>%
   summarise(name = 'total',
            N = as.character(n()),
-           resum = '') %>%
+           summary = '') %>%
   bind_rows(bbdd_umap %>%
               select(eid, sex, smoking) %>%
               mutate(smoking = as.character(smoking)) %>% 
@@ -69,31 +69,47 @@ bbdd_umap %>%
                         .groups = 'keep') %>%
               transmute(name,
                         value,
-                        resum = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100))) %>% 
+                        summary = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100))) %>% 
   bind_rows(bbdd_umap %>%
               select(-sex, -smoking) %>% 
               pivot_longer(cols = !eid) %>%
               group_by(name) %>%
               summarise(N = sum(!is.na(value)),
                         mn = mean(value, na.rm = T),
-                        sd = sd(value, na.rm = T)) %>%
+                        sd = sd(value, na.rm = T),
+                        min = min(value, na.rm = T),
+                        p025 = quantile(value, 0.025, na.rm = T),
+                        q1 = quantile(value, 1/4, na.rm = T),
+                        md = median(value, na.rm = T),
+                        q3 = quantile(value, 3/4, na.rm = T),
+                        p975 = quantile(value, 0.975, na.rm = T),
+                        max = max(value, na.rm = T)) %>%
               transmute(name, 
                         N = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100),
-                        resum = sprintf('%2.1f (%2.1f)', mn, sd))) %>%
-  select(name, value, N, resum) %>%
-  flextable
+                        summary = sprintf('%2.1f (%2.1f)', mn, sd),
+                        min = sprintf('%2.1f', min),
+                        p025 = sprintf('%2.1f', p025),
+                        md_IQR = sprintf('%2.1f [%2.1f - %2.1f]', md, q1, q3),
+                        p975 = sprintf('%2.1f', p975),
+                        max = sprintf('%2.1f', max))) %>%
+  select(name, value, N, summary, min, p025, md_IQR, p975, max) %>% 
+  flextable %>%
+  autofit
 ```
 
 ## Only Case-complet
 ```{r}
 recoded_dat <- bbdd_umap %>%
+  select(-crp) %>% 
   ## Only complete cases
-  drop_na
+  drop_na %>%
+  left_join(bbdd_umap %>%
+              select(eid, crp))
 
 recoded_dat %>%
   summarise(name = 'total',
            N = as.character(n()),
-           resum = '') %>%
+           summary = '') %>%
   bind_rows(recoded_dat %>%
               select(eid, sex, smoking) %>%
               mutate(smoking = as.character(smoking)) %>% 
@@ -103,18 +119,30 @@ recoded_dat %>%
                         .groups = 'keep') %>%
               transmute(name,
                         value,
-                        resum = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100))) %>% 
+                        summary = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100))) %>% 
   bind_rows(recoded_dat %>%
               select(-sex, -smoking) %>% 
               pivot_longer(cols = !eid) %>%
               group_by(name) %>%
               summarise(N = sum(!is.na(value)),
                         mn = mean(value, na.rm = T),
-                        sd = sd(value, na.rm = T)) %>%
+                        sd = sd(value, na.rm = T),
+                        min = min(value, na.rm = T),
+                        p025 = quantile(value, 0.025, na.rm = T),
+                        q1 = quantile(value, 1/4, na.rm = T),
+                        md = median(value, na.rm = T),
+                        q3 = quantile(value, 3/4, na.rm = T),
+                        p975 = quantile(value, 0.975, na.rm = T),
+                        max = max(value, na.rm = T)) %>%
               transmute(name, 
-                        N = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100),
-                        resum = sprintf('%2.1f (%2.1f)', mn, sd))) %>%
-  select(name, value, N, resum) %>%
+                        N = sprintf('%i (%2.1f%%)', N, N/dim(recoded_dat)[1]* 100),
+                        summary = sprintf('%2.1f (%2.1f)', mn, sd),
+                        min = sprintf('%2.1f', min),
+                        p025 = sprintf('%2.1f', p025),
+                        md_IQR = sprintf('%2.1f [%2.1f - %2.1f]', md, q1, q3),
+                        p975 = sprintf('%2.1f', p975),
+                        max = sprintf('%2.1f', max))) %>%
+  select(name, value, N, summary, min, p025, md_IQR, p975, max) %>% 
   flextable
 ```
 ## Distributions
@@ -134,7 +162,7 @@ recoded_dat %>%
     group_by(sex) %>%
     group_modify(~{
         .x %>%
-            select(-eid) %>%
+            select(-eid, -crp) %>%
             cor %>%
             reshape2::melt()
     }) %>%
@@ -153,6 +181,7 @@ recoded_dat %>%
 # Stratification by sex and transformation
 ```{r}
 strat_dat <- recoded_dat %>%
+  select(-crp) %>% 
   split(f = .$sex) %>%
   map(~{.x %>%
       names %>%
@@ -167,6 +196,13 @@ strat_dat <- recoded_dat %>%
       }) %>%
       mutate(eid = .x$eid, .before = 1)
   })
+
+strat_dat <- map2(strat_dat, recoded_dat %>% split(f = .$sex), ~{
+  .y <- .y %>%
+    mutate(crp = if_else(is.na(crp), 0, crp))
+  .x %>%
+    left_join(.y %>% select(eid, crp))
+})
 ```
 
 ## Distribution
@@ -180,7 +216,7 @@ strat_dat %>%
     facet_grid(sex ~ name, scales = "free_x")
 ```
 
-## Corretions
+## Correlations
 ```{r, fig.width=18, fig.height=9}
 strat_dat %>%
   map_dfr(~{.x %>%
@@ -302,35 +338,37 @@ umap_embed %>%
 ```{r, fig.width=11, fig.height=5}
 load('../arch_mod.Rdata')
 archdat <- arch_mod %>%
-  map(~data.frame(.x$archetypes),
+  map(~ data.frame(.x$archetypes),
       .id = "sex")
-arch_dict <- list(
+
+arch_dict <- l<- list(
     Female = tribble(
         ~archnum, ~archnam,
-        1, "High HDL",
-        2, "High FG",
-        3, "Low BP",
-        4, "High CRP",
-        5, "Low WHR",
-        6, "High BP",
-        7, "High WHR",
-        8, "High ALT",
-        9, "High TG",
-        10, "High LDL",
-        11, "High SCR"
+        1, "High HDL/High BP",
+        2, "High LDL",
+        3, "High TG",
+        4, "High HDL",
+        5, "High WHR",
+        6, "High CRP",
+        7, "High BP",
+        8, "Low BP",
+        9, "High ALT",
+        10, "High SCr",
+        11, "Low WHR",
+        12, "High FG"
     ),
     Male = tribble(
         ~archnum, ~archnam,
-        1, "High SCR",
-        2, "High LDL",
-        3, "High ALT",
-        4, "High HDL",
-        5, "High CRP",
-        6, "High WHR",
+        1, "High SCr",
+        2, "High FG",
+        3, "High BP",
+        4, "High CRP",
+        5, "High HDL",
+        6, "Low BP",
         7, "High TG",
-        8, "High BP",
-        9, "High FG",
-        10, "Low WHR"
+        8, "High HDL/High BP",
+        9, "Low WHR",
+        10, "High ALT"
     )
 )
 
@@ -357,22 +395,83 @@ map(c("Female", "Male"),
         labs(x = "UMAP1", y = "UMAP2", title = .x, fill = "Archetypes")
     }) %>%
   wrap_plots(nrow = 1)
+```
 
+## Distribution of probabilities
+```{r, fig.width = 12, fig.height = 4}
+arch_probs <- map2(arch_mod, strat_dat, ~{
+  mod <- .x
+  mod$family$which <- "original"
+  dat <- select(.y, -eid)
+  p <- archetypes:::predict.archetypes(mod, dat)
+  data.frame(eid = .y$eid, p)
+  }) %>%
+  map2(arch_labs, ~{
+    colnames(.x) <- c("eid", gsub(" |/", "_", .y$archnam))
+    .x})
+arch_probs_long <- arch_probs %>%
+    map(pivot_longer, -eid, names_to = "archnam", values_to = "prob") %>%
+    map(mutate, archnam = gsub("_", " ", archnam))
+arch_probs_long %>%
+    bind_rows(.id = "sex") %>%
+    ggplot(aes(archnam, prob)) +
+    geom_boxplot(aes(group = archnam, fill = archnam)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    facet_wrap(~sex, ncol = 1) +
+    labs(x = NULL, y = "Probability")
+```
 
-arch_alphas <- arch_mod %>%
-  map2(arch_labs,
-       ~{data.frame(.x$alphas) %>%
-           setNames(.y$archnam)
+## Maximum probabilities
+```{r, fig.width = 11, fig.height = 5}
+arch_maxprob <- arch_probs_long %>%
+  map(group_by, eid) %>%
+  map(slice_max, prob, with_ties = FALSE)
+umap_embed %>%
+    # map(pluck, "embedding") %>%
+    # map(data.frame) %>%
+    # map2(strat_dat, ~.y %>% select(eid) %>% bind_cols(.x)) %>%
+    map2_dfr(arch_maxprob, inner_join, by = "eid", .id = "sex") %>%
+    ggplot(aes(X1, X2)) +
+    geom_point(aes(color = archnam, alpha = prob)) +
+    guides(color = guide_legend(override.aes = list(shape = 19))) +
+    scale_alpha_identity() +
+    facet_wrap(~sex, nrow = 1) +
+    theme_bw() +
+    labs(x = "UMAP1", y = "UMAP2", color = "Archetypes")
+```
+
+```{r, fig.width = 20, fig.height = 5}
+arch_maxprob %>%
+  imap(~{
+    d <- umap_embed[[.y]]
+    .x %>%
+      split(f = .$archnam) %>%
+      map(function(ARCH){
+        dd <- inner_join(ARCH, d, by = "eid")
+        d %>%
+          ggplot(aes(X1, X2)) +
+          geom_point(alpha = .1) +
+          geom_point(data = dd, color = "red", alpha = .5, size = .2) +
+          theme_bw() +
+          labs(x = NULL, y = NULL, title = ARCH$archnam[1])
         }) %>%
-  map2(strat_dat,
-       ~{.y %>%
-           select(eid) %>%
-           bind_cols(.x)
-        })   
+      modify_at(1, function(g){ g + labs(y = .y) }) %>%
+      wrap_plots(nrow = 1)
+    }) %>%
+  wrap_plots(nrow = 2)
+```
 
-
-
-arch_alphas_long <- arch_alphas %>%
-    map(~pivot_longer(.x, -eid))
+```{r}
+umap_embed %>%
+  map2_dfr(arch_maxprob, inner_join, by = "eid", .id = "sex") %>%
+  filter(prob > .5) %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = archnam, alpha = prob), size = .25) +
+  guides(color = guide_legend(override.aes = list(size = 1))) +
+  scale_alpha_identity() +
+  facet_wrap(~sex, nrow = 1) +
+  theme_bw() +
+  labs(x = "UMAP1", y = "UMAP2", color = "Archetypes")
 ```
 
