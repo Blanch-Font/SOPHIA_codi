@@ -353,7 +353,6 @@ umap_embed %>%
 
 ## Archetypes
 ```{r, fig.width=11, fig.height=5}
-load('../arch_mod.Rdata')
 archdat <- arch_mod %>%
   map(~ data.frame(.x$archetypes),
       .id = "sex")

@@ -14,6 +14,7 @@ library(purrr)
 library(uwot)
 umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
                 ~load_uwot(paste0("umap_model_", .x)))
+load('arch_mod.Rdata')
 
 Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "data/jdbcDrivers/")
 
