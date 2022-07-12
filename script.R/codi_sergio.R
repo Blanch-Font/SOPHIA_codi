@@ -143,6 +143,12 @@ save(cov_cate_resum_T2DM,
      file = 'taules_desc_T2DM.RData')
 
 bbdd_covar_T2DM <- transformToFlat(covariateData_T2DM)
+bbdd_covar_T2DM <- buildFollowUp(cdm_bbdd,
+                                 cdm_schema,
+                                 results_sc,
+                                 cohortTable,
+                                 acohortId = 1,
+                                 bbdd_covar = bbdd_covar_T2DM)
 bbdd_covar <- bbdd_covar_T2DM
 IN <- 'umap_daniel.Rmd'
 OUT <- 'umap_daniel_T2DM.html'
@@ -186,6 +192,12 @@ save(cov_cate_resum_T1DM,
      file = 'taules_desc_T1DM.RData')
 
 bbdd_covar_T1DM <- transformToFlat(covariateData_T1DM)
+bbdd_covar_T1DM <- buildFollowUp(cdm_bbdd,
+                                 cdm_schema,
+                                 results_sc,
+                                 cohortTable,
+                                 acohortId = 2,
+                                 bbdd_covar = bbdd_covar_T1DM)
 bbdd_covar <- bbdd_covar_T1DM
 IN <- 'umap_daniel.Rmd'
 OUT <- 'umap_daniel_T1DM.html'
