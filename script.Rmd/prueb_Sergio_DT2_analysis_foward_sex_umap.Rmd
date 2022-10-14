@@ -1,0 +1,3080 @@
+---
+title: "T2DM_analysis"
+output: html_document
+---
+
+```{r}
+setwd("C:/Users/20621066W/Desktop/T2DM")
+```
+
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+library(uwot)
+library(gridExtra)
+library(ClusterR)
+library(splines)
+library(flextable)
+library(archetypes)
+
+library(survival)
+library(survminer)
+library(ggfortify)
+library(ranger)
+library(stats)
+library(broom)
+```
+
+## Preparación de los datos
+
+```{r}
+# Carreguem les dades
+
+load("bbdd_covar_T2DM.RData")
+bbdd_covar <- bbdd_covar_T2DM
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity')),
+         TimeT2DM = TimeT2DM/365.25) %>% 
+  mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+```
+
+
+## Descriptiva de las variables
+
+```{r}
+desc_bbdd <- function(abbdd){
+  n_sex <- abbdd %>%
+    count(sex = sex_female)
+  abbdd %>%
+    group_by(sex_female) %>% 
+    summarise(name = 'total',
+             N = as.character(n()),
+             resum = as.character(n())) %>%
+    bind_rows(abbdd %>%
+                select(rowId, sex_female, Current, Former, obesity_BMI, A10A, A10B, C02, C03, C07, C08,
+                       C09, C10, M01A, angor, ami, stroke, tia) %>%
+                mutate_if(is.numeric, as.character) %>% 
+                # mutate(Current = as.character(Current),
+                #        Former = as.character(Former),
+                #        obesity_BMI = as.character(obesity_BMI)) %>%
+                pivot_longer(cols = !contains(c('rowId', 'sex_female'))) %>%
+                group_by(sex_female, name, value) %>%
+                summarise(N = n(),
+                          .groups = 'keep') %>%
+                group_by(sex_female, name) %>%
+                transmute(sex_female,
+                          name,
+                          value,
+                          resum = sprintf('%i (%2.1f%%)', N, N/sum(N)*100)) %>%
+                filter(value != 0)) %>% 
+    bind_rows(abbdd %>%
+                select(-Current, -obesity_BMI, -Former, -A10, -A10A, -A10B,
+                       -C02, -C03, -C07, -C08, -C09, -C10, -M01A, -angor, -ami, -stroke, -tia) %>% 
+                pivot_longer(cols = !contains(c('rowId', 'sex_female'))) %>%
+                group_by(sex_female, name) %>%
+                summarise(N = sum(!is.na(value)),
+                          mn = mean(value, na.rm = T),
+                          sd = sd(value, na.rm = T),
+                          .groups = 'keep') %>%
+                transmute(sex_female,
+                          name, 
+                          N = sprintf('%i (%2.1f%%)', N, N/n_sex$n[n_sex$sex == sex_female]*100),
+                          resum = sprintf('%2.1f (%2.1f)', mn, sd))) %>%
+    filter(name != 'NA') %>% 
+    select(sex_female, name, value, N, resum) %>%
+    pivot_wider(names_from = sex_female,
+                values_from = c('N', 'resum')) %>% 
+    flextable %>%
+    autofit
+}
+#desc_bbdd(abbdd = bbdd_covar %>% select(-obesity, -T2DM))
+```
+
+
+## Distribució variables numèriques
+
+```{r}
+ggplot(bbdd_covar %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                TimeT2DM, Ferritin, sex_female, obesity_BMI) %>%
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free") +
+  theme_bw()
+```
+
+
+## Eliminem els valors atípics
+Eliminem els valors superiors a mn +/- 5*SD
+
+```{r distributions, fig.width=20, fig.height=10}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+bbdd_covar <- bbdd_covar %>%
+  group_by(sex_female) %>% 
+  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose',
+                  'TimeT2DM', 'Ferritin'),
+                remove_outliers)) %>%
+  ungroup
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI, TimeT2DM, Ferritin,
+                                  Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
+         TimeT2DM, sex_female, obesity_BMI, Current, Former, Ferritin, 
+         ami, angor, stroke, tia,
+         A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
+desc_bbdd(abbdd = bbdd)
+ggplot(bbdd %>%
+         select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose,
+                TimeT2DM, Ferritin,
+                sex_female, obesity_BMI) %>% 
+         pivot_longer(-c(rowId, sex_female, obesity_BMI)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free") +
+  theme_bw()
+```
+
+## Correlacions
+```{r correlations, fig.width=12, fig.height=5}
+bbdd %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
+         Ferritin,sex_female) %>%
+  split(f = .$sex_female) %>% 
+  map_dfr(~{.x %>% 
+      select(-rowId, -sex_female) %>% 
+      cor %>%
+      reshape2::melt()},
+      .id = "sex") %>% 
+  mutate(rsq = value^2, 
+           to_mark = ifelse(Var1 != Var2 & rsq > .25, "*", NA),
+           across(c(Var1, Var2), toupper)) %>%
+    ggplot(aes(Var1, Var2, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = to_mark), na.rm = TRUE) +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1)) +
+    theme_minimal() +
+    facet_wrap(~sex, nrow = 1) +
+    labs(x = NULL, y = NULL, fill = "Correlation", caption = "* Squared correlation higher than 0.25")
+```
+
+# UMAP with residualized
+```{r residualization, fig.width=12, fig.height=5}
+bbdd_resid <- bbdd %>%
+  mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09)) %>%
+  split(f = .$sex_female) %>%
+  map(~{
+    .x %>%
+    transmute(rowId,
+              across(c("HbA1c", "Glucose", "Leukocytes", "Monocytes", "cLDL", "cHDL", "Tg",
+                       "DBP", "SBP", 'TimeT2DM', 'Ferritin'),
+                     function(v,...){
+                       dd <- data.frame(vcol = v, a = age, b = BMI, c = Current,
+                                        d = Former, a10a = A10A, a10b = A10B, f = C10, g = HTA_med)
+                       knots_age <- quantile(x = dd$age,
+                                             probs = c(0.2, 0.4, 0.6, 0.8))
+                       knots_BMI <- quantile(x = dd$BMI,
+                                             probs = c(0.2, 0.4, 0.6, 0.8))
+                       lm(vcol ~ bs(a, knots = knots_age) + bs(b, knots = knots_BMI) +
+                            c + a10a + a10b + f + g, data = dd) %>%
+                         resid %>% scale %>% as.vector
+                     }))
+  })
+
+
+ggplot(bbdd_resid %>%
+         bind_rows(.id = "sex_female") %>%
+         pivot_longer(-c(rowId, sex_female)) %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))),
+       aes(value)) +
+  geom_histogram(bins = 50) +
+  facet_grid(sex_female ~ name, scales = "free") +
+  theme_bw()
+bbdd_resid_saved <- bbdd_resid
+```
+
+## Correlations
+
+```{r, fig.width=11, fig.height=5}
+bbdd_resid %>%
+  map_dfr(~{.x %>% 
+      select(-rowId) %>% 
+      cor %>%
+      reshape2::melt()},
+      .id = "sex") %>% 
+  mutate(rsq = value^2, 
+           to_mark = ifelse(Var1 != Var2 & rsq > .25, "*", NA),
+           across(c(Var1, Var2), toupper)) %>%
+    ggplot(aes(Var1, Var2, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = to_mark), na.rm = TRUE) +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1)) +
+    theme_minimal() +
+    facet_wrap(~sex, nrow = 1) +
+    labs(x = NULL, y = NULL, fill = "Correlation", caption = "* Squared correlation higher than 0.25")
+```
+
+# UMAP
+Calculem l'UMAP sense estandarditzar. Utilitzem la mètrica Manhattan.
+```{r umap_resid}
+umap_resid <- bbdd_resid %>%
+  map(~{
+    n_total <- nrow(.x)
+    nn <- round(10 + 15 * (log10(n_total) - 3))
+    # print(names(.x))
+    umap(X = .x %>% select(-rowId),
+         n_neighbors = nn,
+         min_dist = 0,
+         n_components = 2, 
+         nn_method = "annoy",
+         approx_pow = TRUE,
+         n_sgd_threads = "auto", 
+         binary_edge_weights = TRUE,
+         dens_scale = .5, 
+         ret_extra = c("model", "nn", "fgraph"))
+  })
+umap_embed <- bbdd_resid %>%
+  map2(umap_resid, ~{
+    dat1 <- tibble(rowId = .x$rowId)
+    dat2 <- data.frame(.y$embedding)
+    bind_cols(dat1, dat2)
+  })
+umap_embed %>%
+    bind_rows(.id = "sex") %>%
+    ggplot(aes(X1, X2)) +
+    geom_point(alpha = .1) +
+    facet_wrap(~sex, nrow = 1) +
+    theme_bw() +
+    labs(x = "UMAP1", y = "UMAP2")
+umap_embed %>%
+    bind_rows(.id = "sex") %>%
+    ggplot(aes(X1, X2)) +
+    geom_density_2d_filled() +
+    facet_wrap(~sex, nrow = 1) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    labs(x = "UMAP1", y = "UMAP2")
+
+umap_embed_saved <- umap_embed
+```
+
+
+## Overlaying input variables
+```{r, fig.width=9, fig.height=12}
+umap_embed %>%
+  bind_rows(.id = "sex_female") %>%
+  {
+    d <- bbdd %>%
+      select(rowId, sex_female, age, BMI)
+    inner_join(., d, by = c("rowId", "sex_female"))
+  } %>%
+  pivot_longer(-c(X1, X2, sex_female, rowId)) %>%
+  split(f = .$name) %>%
+  imap(~{
+    mp <- median(.x$value)
+    .x %>%
+      ggplot(aes(X1, X2)) +
+      geom_point(aes(color = value)) +
+      scale_color_gradient2(midpoint = mp) +
+      facet_wrap(~sex_female, nrow = 1) +
+      theme_bw() +
+      labs(x = "UMAP1", y = "UMAP2", 
+           title = ifelse(.y == "bmi", "BMI", stringr::str_to_title(.y)), 
+           color = NULL)
+  }) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r, fig.width=15, fig.height=7.5}
+umap_embed %>%
+  bind_rows(.id = "sex_female") %>%
+  {
+    d <- bbdd %>%
+      mutate(HTA_med = as.numeric(C02 | C03 | C07 | C08 | C09),
+             obesity_BMI = as.numeric(obesity_BMI == 'Obesity')) %>%
+      select(rowId, sex_female, obesity_BMI, Current, Former, ami, angor, stroke, tia,
+             A10A, A10B, HTA_med, C10, M01A)
+    inner_join(., d, by = c("rowId", "sex_female"))
+  } %>%
+  pivot_longer(-c(X1, X2, sex_female, rowId)) %>%
+  mutate(name = toupper(name),
+         value = as.factor(value)) %>% 
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = value)) +
+  facet_grid(sex_female + value ~ name) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL,
+       y = NULL,
+       color = "Value")
+```
+
+```{r, fig.width=15, fig.height=5}
+umap_embed %>%
+  map2_dfr(bbdd_resid,
+           inner_join,
+           by = "rowId",
+           .id = "sex_female") %>%
+  tidyr::pivot_longer(-c(X1, X2, sex_female, rowId)) %>%
+  mutate(name = toupper(name)) %>% #, 
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = value)) +
+  scale_color_gradient2(limits = c(-10, 10), low = scales::muted("blue"), high = scales::muted("red")) +
+  facet_grid(sex_female ~ name) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL,
+       y = NULL,
+       color = "Value")
+```
+
+## Correlation between UMAP axes and input variables
+
+```{r, fig.width=10, fig.height=7}                             
+umap_embed %>%
+  map2_dfr(bbdd_resid,
+           inner_join,
+           by = "rowId",
+           .id = "sex_female") %>%
+  {
+    d <- bbdd %>%                                                                                                     
+      select(rowId, sex_female, age, BMI)
+    inner_join(., d, by = c("rowId", "sex_female"))
+  } %>%
+  tidyr::pivot_longer(-c(sex_female, rowId, X1, X2)) %>%
+  group_by(sex_female, name) %>%
+  group_modify(~{
+    .x %>%
+      with(data.frame(umap_axis = c("UMAP1", "UMAP2"),
+                      Correlation = c(cor(X1, value), cor(X2, value))))
+  }) %>%
+  mutate(name = toupper(name)) %>%
+  group_by(sex_female, umap_axis) %>%
+  group_map(~{.x %>%
+      ggplot(aes(Correlation, reorder(name, abs(Correlation)))) +
+      geom_vline(xintercept = 0, lty = "dashed") +
+      geom_segment(aes(xend = 0, yend = reorder(name, abs(Correlation)))) +
+      geom_point(color = "red") +
+      theme_bw() +
+      labs(x = NULL, y = NULL, title = paste(.y$sex_female, "-", .y$umap_axis))
+  }) %>%
+  wrap_plots
+```
+
+## Archetypes
+
+```{r}
+umap_fgraphs <- umap_resid %>%
+  map2(bbdd_resid,
+       ~`dimnames<-`(.x$fgraph, list(.y$rowId, .y$rowId))) %>%
+  map(~igraph::graph_from_adjacency_matrix(.x, mode = "undirected"))
+eigen_res <- umap_fgraphs %>%
+  map(~igraph::cluster_leading_eigen(.x))
+eigen_clus <- eigen_res %>%
+  map(igraph::membership) %>%
+  map(~data.frame(rowId = as.numeric(names(.x)), cluster = as.numeric(.x)))
+evcent_dat <- eigen_clus %>%
+  imap(~.x %>%
+         split(f = .$cluster) %>%
+         map_dfr(function(CLUS){
+           igraph::subgraph(umap_fgraphs[[.y]], as.character(CLUS$rowId)) %>%
+             igraph::evcent() %>%
+             pluck("vector") %>%
+             data.frame %>%
+             tibble::rownames_to_column() %>%
+             setNames(c("rowId", "evcent_score")) %>%
+             mutate(rowId = as.numeric(rowId))
+          },
+          .id = "cluster") %>%
+         mutate(cluster = as.numeric(cluster)))
+repr_ind <- evcent_dat %>%
+  map(~.x %>%
+        group_by(cluster) %>%
+        slice_max(evcent_score) %>%
+        ungroup)
+arch_mod <- bbdd_resid %>%
+  imap(~{mat <- select(.x, -rowId)
+  mat <- as.matrix(mat)
+  initpoints <- which(.x$rowId %in% repr_ind[[.y]]$rowId)
+  res <- archetypes::archetypes(
+                mat, 
+                k = length(initpoints), 
+                family = archetypes::archetypesFamily(initfn = archetypes:::make.fix.initfn(initpoints)),
+                verbose = FALSE,
+                saveHistory = FALSE)
+  return(res)
+})
+archdat <- arch_mod %>%
+  map(~data.frame(.x$archetypes), .id = "sex_female")
+```
+
+```{r, fig.width=20, fig.height=5}
+archdat %>%
+  map_dfr(~{.x %>%
+      mutate(arch_number = factor(row_number())) %>%
+      pivot_longer(-arch_number)
+    },
+    .id = "sex_female") %>%
+  mutate(name = toupper(name)) %>%
+  ggplot(aes(value, arch_number)) +
+  geom_vline(xintercept = 0) +
+  geom_segment(aes(xend = 0, yend = arch_number)) +
+  geom_point() +
+  facet_grid(sex_female ~ name, scales = "free_y") +
+  labs(x = NULL, y = NULL) +
+  theme_bw()
+```
+```{r, fig.width=11, fig.height=5}
+
+
+dic_women <- matrix(ncol=2, nrow=nrow(archdat$Women))
+colnames(dic_women) <- c("archnum", "archnam")
+for (x in 1: nrow(dic_women)){
+  dic_women[x,1] = x
+  dic_women[x,2] = paste("Cluster", x, sep = " ")
+}
+
+dic_men <- matrix(ncol=2, nrow=nrow(archdat$Men))
+colnames(dic_men) <- c("archnum", "archnam")
+for (x in 1: nrow(dic_men)){
+  dic_men[x,1] = x
+  dic_men[x,2] = paste("Cluster", x, sep = " ")
+}
+
+arch_dict <- list(
+    Women = as_tibble(dic_women),
+    Men = as_tibble(dic_men))
+
+arch_labs <- archdat %>%
+  imap(~{bind_cols(arch_dict[[.y]], .x)})
+
+archdat_umap <- map(
+  setNames(c("Men", "Women"), c("Men", "Women")), ~{
+    d <- select(arch_labs[[.x]], -c(archnum, archnam))
+    res <- umap_transform(d, umap_resid[[.x]])
+    res <- data.frame(res)
+    bind_cols(select(arch_labs[[.x]], archnam), res)
+  })
+map(c("Men", "Women"), ~{
+  umap_embed[[.x]] %>%
+    ggplot(aes(X1, X2)) +
+    geom_point(alpha = .1) +
+    geom_point(data = archdat_umap[[.x]], aes(fill = archnam), shape = 23, size = 3) +
+    theme_bw() +
+    labs(x = "UMAP1", y = "UMAP2", title = .x, fill = "Archetypes")
+  }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=12, fig.height=4}
+arch_alphas <- arch_mod %>%
+  map2(arch_labs, ~{
+    data.frame(.x$alphas) %>%
+      setNames(.y$archnam)
+    }) %>%
+  map2(bbdd_resid, ~{
+    .y %>%
+      select(rowId) %>%
+      bind_cols(.x)
+  })
+arch_alphas_long <- arch_alphas %>%
+    map(~pivot_longer(.x, -rowId))
+arch_alphas_long %>%
+  bind_rows(.id = "sex_female") %>%
+  ggplot(aes(name, value)) +
+  geom_boxplot(aes(group = name, fill = name)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~sex_female, ncol = 1) +
+  labs(x = NULL, y = "Probability")
+```
+
+```{r, fig.width=11, fig.height=5}
+arch_maxprob <- arch_alphas_long %>%
+  map(~{.x %>%
+      group_by(rowId) %>%
+      slice_max(value, with_ties = FALSE) %>%
+      ungroup
+    })
+arch_maxprob %>%
+  imap(~{.x %>%
+      inner_join(umap_embed[[.y]], by = "rowId")
+    }) %>%
+  bind_rows(.id = "sex_female") %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = name, alpha = value)) +
+  guides(color = guide_legend(override.aes = list(shape = 19))) +
+  scale_alpha_identity() +
+  facet_wrap(~sex_female, nrow = 1) +
+  theme_bw() +
+  labs(x = "UMAP1", y = "UMAP2", color = "Archetypes")
+```
+
+```{r, fig.width=20, fig.height=5}
+arch_maxprob %>%
+  imap(~{d <- umap_embed[[.y]]
+  .x %>%
+    split(f = .$name) %>%
+    map(function(ARCH){
+      dd <- inner_join(ARCH, d, by = "rowId")
+      d %>%
+        ggplot(aes(X1, X2)) +
+        geom_point(alpha = .1) +
+        geom_point(data = dd, color = "red", alpha = .5, size = .2) +
+        theme_bw() +
+        labs(x = NULL, y = NULL, title = ARCH$name[1])
+      }) %>%
+    modify_at(1, function(g){ g + labs(y = .y) }) %>%
+    wrap_plots(nrow = 1)
+  }) %>%
+  wrap_plots(nrow = 2)
+```
+
+```{r, fig.width=11, fig.height=5}
+arch_maxprob %>%
+  imap(~{.x %>%
+      filter(value > .5) %>%
+      inner_join(umap_embed[[.y]], by = "rowId")
+    }) %>%
+  bind_rows(.id = "sex_female") %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = name, alpha = value)) +
+  guides(color = guide_legend(override.aes = list(shape = 19))) +
+  scale_alpha_identity() +
+  facet_wrap(~sex_female, nrow = 1) +
+  theme_bw() +
+  labs(x = "UMAP1", y = "UMAP2", color = "Archetypes")
+```
+
+```{r}
+diseases <- bbdd_covar %>% select(rowId, ami, angor, stroke, tia)
+
+umap_disease <- umap_resid %>%
+    map(pluck, "embedding") %>%
+    map(data.frame) %>%
+    map2_dfr(bbdd_resid, bind_cols, .id = "sex") %>%
+    select(sex, rowId, X1, X2) %>%
+    left_join(diseases, by = "rowId")
+head(umap_disease)
+```
+
+
+```{r}
+options(repr.plot.width = 2, repr.plot.height = 10)
+umap_disease %>%
+    split(f = .$sex) %>%
+    imap(
+        ~{
+            .x %>%
+                tidyr::pivot_longer(-c(rowId, sex, X1, X2), names_to = "Disease", values_to = "Diagnosis") %>%
+                mutate(Disease = gsub("_", " ", Disease),
+                       Diagnosis = ifelse(Diagnosis == 1, "Yes", "No")) %>%
+                ggplot(aes(X1, X2)) +
+                geom_point(aes(color = Diagnosis, 
+                               shape = ifelse(Diagnosis == "Yes", "*", "."),
+                               alpha = ifelse(Diagnosis == "Yes", .5, .1)),
+                           na.rm = TRUE) +
+                scale_shape_identity() +
+                scale_alpha_identity() +
+                scale_color_manual(values = c("grey", "red")) +
+                guides(color = guide_legend(override.aes = list(alpha = 1))) +
+                geom_point(data = archdat_umap[[.y]], aes(fill = archnam), shape = 23, size = 3) +
+                facet_wrap(~Disease, nrow = 2) +
+                theme_bw() +
+                labs(title = .x$sex[1], x = "UMAP1", y = "UMAP2", fill = paste("Archetypes -", .y))
+        }
+    ) %>%
+    patchwork::wrap_plots(ncol = 1, guides = "collect")
+```
+
+```{r}
+arch_disease <- umap_disease %>%
+    select(-c(X1, X2)) %>%
+    pivot_longer(-c(sex, rowId), names_to = "Disease", values_to = "Diagnosis") %>%
+    split(f = .$sex) %>%
+    imap(~inner_join(.x, arch_alphas_long[[.y]], by = "rowId"))
+map(arch_disease, head)
+```
+
+```{r}
+arch_logreg <- arch_disease %>%
+    map_dfr(
+        ~{
+            .x %>%
+                mutate(
+                    prob = ifelse(value == 0, .Machine$double.eps, value)
+                ) %>%
+                split(f = .$Disease) %>%
+                map_dfr(
+                    function(DX){
+                        DX %>%
+                            split(f = .$name) %>%
+                            map_dfr(
+                                function(ARCH){
+                                    suppressWarnings({
+                                        glm(Diagnosis ~ value, data = ARCH, family = binomial) %>%
+                                            broom::tidy()
+                                    })
+                                },
+                                .id = "Archetype"
+                            )
+                    },
+                    .id = "Disease"
+                )
+        },
+        .id = "sex"
+    )
+
+
+head(arch_logreg)
+```
+
+```{r}
+options(repr.plot.width = 8, repr.plot.height = 20)
+arch_logreg %>%
+    filter(term == "value") %>%
+    filter(p.value < .1) %>%
+    mutate(ci = qnorm(1 - .05/2) * std.error,
+           conf.low = estimate - ci, conf.high = estimate + ci) %>%
+    ggplot(aes(estimate, interaction(Disease, Archetype))) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = Archetype)) +
+    scale_y_discrete(guide = ggh4x::guide_axis_nested()) +
+    facet_wrap(~sex, nrow = 1, scales = "free") +
+    theme_bw() +
+    theme(legend.position = "none") +
+    labs(title = "Significant cross-sectional associations with diseases\n", 
+         x = "Log OR per 1% increase\nin archetypal probability", y = NULL)
+```
+### STROKE
+
+```{r}
+
+diseases <- bbdd_covar %>% select(rowId, age, BMI,BMI, HbA1c, Glucose, Leukocytes, Monocytes,
+                                         cLDL, cHDL, Tg, DBP, SBP, TimeT2DM, Ferritin,  t.ep_StrokeI, i.ep_StrokeI,
+                                  t.ep_AMI, i.ep_AMI, t.ep_Angor, i.ep_Angor, t.ep_TIA, i.ep_TIA, sex_female, ami, stroke, angor, tia)
+
+diseases <- diseases %>% group_by(sex_female) %>% group_split() %>% map2(arch_maxprob, function(dat, arch){
+dat <- arch %>% select(rowId, name) %>% left_join(dat, by="rowId")
+})
+
+diseases <- diseases %>% map(function(dat){dat <- dat %>% filter(ami == 0, stroke == 0, angor==0, tia == 0)})
+
+```
+
+```{r}
+diseases  %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ name, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+
+clusters_men <- diseases[[1]] 
+clusters_men$name <- as.factor(clusters_men$name)
+clusters_men$name <- relevel(clusters_men$name, ref= "Cluster 1") #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- diseases[[2]]
+clusters_women <- clusters_women %>% filter(name != "Cluster 3")
+clusters_women$name <- as.factor(clusters_women$name)
+clusters_women$name <- relevel(clusters_women$name, ref = "Cluster 4")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ name, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### AMI 
+
+```{r}
+diseases  %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ name, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+
+clusters_men <- diseases[[1]] 
+clusters_men$name <- as.factor(clusters_men$name)
+clusters_men$name <- relevel(clusters_men$name, ref="Cluster 5") #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- diseases[[2]]
+clusters_women <- clusters_women %>% filter(name != "Cluster 8", name != "Cluster 3")
+clusters_women$name <- as.factor(clusters_women$name)
+clusters_women$name <- relevel(clusters_women$name, ref = "Cluster 7")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ name, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### TIA
+
+```{r}
+diseases  %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ name, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+
+clusters_men <- diseases[[1]] 
+clusters_men <- clusters_men %>%filter(name != "Cluster 5", name != "Cluster 1")
+clusters_men$name <- as.factor(clusters_men$name)
+clusters_men$name <- relevel(clusters_men$name, ref="Cluster 2") #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- diseases[[2]]
+clusters_women$name <- as.factor(clusters_women$name)
+clusters_women$name <- relevel(clusters_women$name, ref = "Cluster 3")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ name, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### Angor 
+
+```{r}
+diseases  %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_Angor) ~ name, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+
+clusters_men <- diseases[[1]] 
+clusters_men <- clusters_men %>% filter (name != "Cluster 7")
+clusters_men$name <- as.factor(clusters_men$name)
+clusters_men$name <- relevel(clusters_men$name, ref="Cluster 2") #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- diseases[[2]]
+clusters_women$name <- as.factor(clusters_women$name)
+clusters_women$name <- relevel(clusters_women$name, ref = "Cluster 8")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_Angor, i.ep_Angor)~age + BMI+ name, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+## GMM MODEL
+
+```{r}
+men <- rep(c("Male"), nrow(bbdd_resid[[1]]))
+list_men <- cbind(bbdd_resid[[1]], men)
+names <- colnames(bbdd_resid[[1]])
+colnames(list_men) <- c(names, "sex_female")
+
+women <- rep(c("Female"), nrow(bbdd_resid[[2]]))
+list_women <- cbind(bbdd_resid[[2]], women)
+colnames(list_women) <- c(names, "sex_female")
+
+bbdd_resid <- rbind(list_men, list_women)
+```
+
+
+```{r}
+BIC_curve <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(sex_female, .add = T) %>%
+  group_split() %>% 
+  map_dfr(function(strat){
+    res <- Optimal_Clusters_GMM(data = strat %>% select(-sex_female),
+                                max_clusters = 1:20, criterion = "BIC",
+                                em_iter = 10, plot_data = FALSE)
+    data.frame(sex_female = strat$sex_female[1],
+               nclus = 1:20,
+               BIC = as.vector(res))
+  })
+ggplot(BIC_curve,
+       aes(nclus, BIC)) +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters") +
+  theme_bw()
+ggplot(data = BIC_curve %>%
+         mutate(bicgrad = abs(BIC - lag(BIC))) %>%
+         ungroup %>%
+         drop_na,
+       aes(nclus - .5, bicgrad)) +
+  geom_col(alpha = .3, color = "darkgrey") +
+  geom_line(group = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:20) +
+  facet_wrap(~ sex_female, scales = "free") +
+  labs(x = "N clusters", y = "BIC change") +
+  theme_bw()
+fxclus <- function(x, k){
+    mod <- GMM(data = x, gaussian_comps = k, em_iter = 10)
+    pred <- predict_GMM(x, CENTROIDS = mod$centroids, 
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(cluster = as.integer(pred$cluster_labels)))
+}
+res_sil <- bbdd_resid %>%
+  select(-rowId) %>% 
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    map_dfr(2:10, function(k){
+      map_dfr(1:100, function(iter){
+        set.seed(iter)
+        scaledat <- strat %>%
+          select(-sex_female) %>%
+          slice_sample(n = 1000)
+        d <- dist(as.matrix(scaledat))
+        res <- fxclus(scaledat, k)
+        ave_sil <- cluster::silhouette(res$cluster, d)
+        data.frame(nclus = k, mean_sil_width = mean(ave_sil[,"sil_width"]))
+      })
+    })
+  },
+  .id = "sex_female")
+res_sil %>%
+  group_by(sex_female, nclus) %>%
+  summarise(mean_sw = mean(mean_sil_width),
+            se_sw = sd(mean_sil_width)/(sqrt(length(mean_sil_width))),
+            .groups = "drop") %>%
+  ggplot(aes(nclus, mean_sw)) +
+  geom_line(group = 1) +
+  geom_linerange(aes(ymin = mean_sw - se_sw, ymax = mean_sw + se_sw)) +
+  geom_point() +
+  scale_x_continuous(breaks = 1:10) +
+  facet_wrap(~ sex_female, nrow = 1, scales = "free") +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Mean silhouette width")
+bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map_dfr(function(strat){
+    map_dfr(2:20, function(nclus){
+      scaledat <- strat %>%
+          select(-sex_female)
+      data.frame(cluster = fxclus(scaledat, nclus)$cluster) %>%
+        count(cluster) %>%
+        mutate(n = 100 * (n/sum(n))) %>%
+        slice_min(n, with_ties = FALSE) %>%
+        mutate(nclus)
+    })
+  },
+  .id = 'sex_female') %>%
+  ggplot(aes(nclus, n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  facet_wrap(~sex_female, nrow = 1) +
+  theme_bw() +
+  labs(x = "Number of clusters", y = "Size of smallest cluster (%)")
+
+```
+
+```{r}
+umap_embed
+```
+
+
+```{r}
+bbdd_umap_50_resid <- umap_embed
+names(bbdd_umap_50_resid) <- c("Men", "Women")
+
+
+men <- matrix(data= c("Men"), nrow=nrow(bbdd_umap_50_resid$Men))
+colnames(men) =c("sex")
+
+bbdd_umap_50_resid_men <- cbind(bbdd_umap_50_resid$Men, men)
+
+women <- matrix(data= c("Women"), nrow=nrow(bbdd_umap_50_resid$Women))
+colnames(women) =c("sex")
+
+bbdd_umap_50_resid_women <- cbind(bbdd_umap_50_resid$Women, women)
+
+bbdd_umap_50_resid <- rbind(bbdd_umap_50_resid_women, bbdd_umap_50_resid_men)
+
+bbdd_umap_50_resid_saved <- bbdd_umap_50_resid
+
+```
+
+
+## 6 clusters
+
+```{r}
+bbdd_umap_50_resid <- bbdd_umap_50_resid_saved
+```
+
+
+```{r}
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-sex_female)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 6,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$sex_female[1]))
+  })
+
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(sex, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
+  theme_bw()
+
+
+gmm_res %>%
+    map(
+        function(strata){
+            data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+                ggplot(aes(MaxProb)) +
+                geom_histogram(bins = 10, fill = "lightblue", color = "black")
+        }
+    ) %>%
+    wrap_plots &
+    theme_bw() &
+    labs(y = "Count")
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "sex") %>%
+    ggplot(aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       sex = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~sex) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+
+
+gmm_res %>%
+    map2(bbdd %>%
+           select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+                  sex_female) %>% 
+           group_by(sex_female, .add = T) %>%
+           group_split(),
+         function(strata, data){
+           varnames <- names(select(data, -c(sex_female)))
+           centroid_dat <- strata$mod$centroids %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_mean"))
+           sd_dat <- strata$mod$covariance_matrices %>%
+             sqrt %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_sd"))
+           cbind(centroid_dat, sd_dat) %>%
+             tibble::rownames_to_column("component") %>%
+             pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+             mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+             ggplot(aes(mean, component)) +
+             geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+             geom_vline(xintercept = c(-1, 1) * qnorm(1 - .2/2), lty = "dashed", color = "darkred") +
+             geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+             geom_point(size = 2) +
+             facet_wrap(~name, ncol = 3, scales = "free_x") +
+             labs(title = strata$grp, x = NULL, y = NULL) +
+             theme_bw()
+         }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(sex_female = sex, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-sex_female, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, sex, sex_female)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$sex[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r}
+gmm_6 <- gmm_res
+```
+
+## 7 clusters
+
+```{r}
+bbdd_umap_50_resid <- bbdd_umap_50_resid_saved
+```
+
+
+```{r}
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-sex_female)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 7,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$sex_female[1]))
+  })
+
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(sex, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
+  theme_bw()
+
+
+gmm_res %>%
+    map(
+        function(strata){
+            data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+                ggplot(aes(MaxProb)) +
+                geom_histogram(bins = 10, fill = "lightblue", color = "black")
+        }
+    ) %>%
+    wrap_plots &
+    theme_bw() &
+    labs(y = "Count")
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "sex") %>%
+    ggplot(aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       sex = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~sex) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+
+
+gmm_res %>%
+    map2(bbdd %>%
+           select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+                  sex_female) %>% 
+           group_by(sex_female, .add = T) %>%
+           group_split(),
+         function(strata, data){
+           varnames <- names(select(data, -c(sex_female)))
+           centroid_dat <- strata$mod$centroids %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_mean"))
+           sd_dat <- strata$mod$covariance_matrices %>%
+             sqrt %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_sd"))
+           cbind(centroid_dat, sd_dat) %>%
+             tibble::rownames_to_column("component") %>%
+             pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+             mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+             ggplot(aes(mean, component)) +
+             geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+             geom_vline(xintercept = c(-1, 1) * qnorm(1 - .2/2), lty = "dashed", color = "darkred") +
+             geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+             geom_point(size = 2) +
+             facet_wrap(~name, ncol = 3, scales = "free_x") +
+             labs(title = strata$grp, x = NULL, y = NULL) +
+             theme_bw()
+         }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(sex_female = sex, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-sex_female, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, sex, sex_female)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$sex[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r}
+gmm_7 <- gmm_res
+```
+
+
+```{r}
+gmm_res <- gmm_7
+```
+
+## 8 clusters
+
+```{r}
+bbdd_umap_50_resid <- bbdd_umap_50_resid_saved
+```
+
+
+```{r}
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-sex_female)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 8,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$sex_female[1]))
+  })
+
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(sex, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
+  theme_bw()
+
+
+gmm_res %>%
+    map(
+        function(strata){
+            data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+                ggplot(aes(MaxProb)) +
+                geom_histogram(bins = 10, fill = "lightblue", color = "black")
+        }
+    ) %>%
+    wrap_plots &
+    theme_bw() &
+    labs(y = "Count")
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "sex") %>%
+    ggplot(aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       sex = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~sex) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+
+
+gmm_res %>%
+    map2(bbdd %>%
+           select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+                  sex_female) %>% 
+           group_by(sex_female, .add = T) %>%
+           group_split(),
+         function(strata, data){
+           varnames <- names(select(data, -c(sex_female)))
+           centroid_dat <- strata$mod$centroids %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_mean"))
+           sd_dat <- strata$mod$covariance_matrices %>%
+             sqrt %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_sd"))
+           cbind(centroid_dat, sd_dat) %>%
+             tibble::rownames_to_column("component") %>%
+             pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+             mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+             ggplot(aes(mean, component)) +
+             geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+             geom_vline(xintercept = c(-1, 1) * qnorm(1 - .2/2), lty = "dashed", color = "darkred") +
+             geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+             geom_point(size = 2) +
+             facet_wrap(~name, ncol = 3, scales = "free_x") +
+             labs(title = strata$grp, x = NULL, y = NULL) +
+             theme_bw()
+         }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(sex_female = sex, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-sex_female, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, sex, sex_female)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$sex[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r}
+gmm_8 <- gmm_res
+```
+
+## 9 clusters
+```{r}
+bbdd_umap_50_resid <- bbdd_umap_50_resid_saved
+```
+
+
+```{r}
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-sex_female)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 9,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$sex_female[1]))
+  })
+
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(sex, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
+  theme_bw()
+
+
+gmm_res %>%
+    map(
+        function(strata){
+            data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+                ggplot(aes(MaxProb)) +
+                geom_histogram(bins = 10, fill = "lightblue", color = "black")
+        }
+    ) %>%
+    wrap_plots &
+    theme_bw() &
+    labs(y = "Count")
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "sex") %>%
+    ggplot(aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       sex = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~sex) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+
+
+gmm_res %>%
+    map2(bbdd %>%
+           select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+                  sex_female) %>% 
+           group_by(sex_female, .add = T) %>%
+           group_split(),
+         function(strata, data){
+           varnames <- names(select(data, -c(sex_female)))
+           centroid_dat <- strata$mod$centroids %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_mean"))
+           sd_dat <- strata$mod$covariance_matrices %>%
+             sqrt %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_sd"))
+           cbind(centroid_dat, sd_dat) %>%
+             tibble::rownames_to_column("component") %>%
+             pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+             mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+             ggplot(aes(mean, component)) +
+             geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+             geom_vline(xintercept = c(-1, 1) * qnorm(1 - .2/2), lty = "dashed", color = "darkred") +
+             geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+             geom_point(size = 2) +
+             facet_wrap(~name, ncol = 3, scales = "free_x") +
+             labs(title = strata$grp, x = NULL, y = NULL) +
+             theme_bw()
+         }) %>%
+  wrap_plots(nrow = 1)
+```
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(sex_female = sex, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-sex_female, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, sex, sex_female)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$sex[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r}
+gmm_9 <- gmm_res
+```
+
+10 clusters
+
+```{r}
+bbdd_umap_50_resid <- bbdd_umap_50_resid_saved
+```
+
+
+```{r}
+
+set.seed(12345)
+gmm_res <- bbdd_resid %>%
+  select(-rowId) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map(function(strat){
+    scaledat <- strat %>%
+      select(-sex_female)
+    mod <- GMM(data = scaledat,
+               gaussian_comps = 10,
+               em_iter = 10)
+    pred <- predict_GMM(scaledat,
+                        CENTROIDS = mod$centroids,
+                        COVARIANCE = mod$covariance_matrices, 
+                        WEIGHTS = mod$weights)
+    return(list(mod = mod,
+                pred = pred,
+                grp = strat$sex_female[1]))
+  })
+
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+
+bbdd_umap_50_resid <- bbdd_umap_50_resid %>%
+  group_by(sex, .add = T) %>%
+  group_split() %>%
+  map2_dfr(gmm_res,
+           ~.x %>%
+             bind_cols(cluster_gmm = as.factor(.y$pred$cluster_labels)))
+
+
+ggplot(bbdd_umap_50_resid) +
+  geom_point(aes(x = X1, y = X2, colour = cluster_gmm)) +
+  facet_grid(. ~ sex) +
+  theme_bw()
+
+
+gmm_res %>%
+    map(
+        function(strata){
+            data.frame(MaxProb = apply(strata$pred$cluster_proba, 1, max)) %>%
+                ggplot(aes(MaxProb)) +
+                geom_histogram(bins = 10, fill = "lightblue", color = "black")
+        }
+    ) %>%
+    wrap_plots &
+    theme_bw() &
+    labs(y = "Count")
+gmm_res %>%
+    map_dfr(~data.frame(prob80 = apply(.x$pred$cluster_proba, 1, max) > .8), .id = "sex") %>%
+    ggplot(aes(sex, fill = prob80)) +
+    geom_bar(stat="count", position ="fill") +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = NULL, y = "%", fill = "MaxP > 80%")
+gmm_res %>%
+    map_dfr(~data.frame(cluster = .x$pred$cluster_labels) %>%
+                count(cluster, name = "size") %>%
+                mutate(prop = size / sum(size),
+                       sex = .x$grp)) %>%
+    ggplot(aes(cluster, prop * 100)) +
+    geom_col(fill = "lightblue", color = "black") +
+    facet_wrap(~sex) +
+    theme_bw() +
+    labs(x = "Cluster", y = "%")
+
+
+
+gmm_res %>%
+    map2(bbdd %>%
+           select(HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+                  sex_female) %>% 
+           group_by(sex_female, .add = T) %>%
+           group_split(),
+         function(strata, data){
+           varnames <- names(select(data, -c(sex_female)))
+           centroid_dat <- strata$mod$centroids %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_mean"))
+           sd_dat <- strata$mod$covariance_matrices %>%
+             sqrt %>%
+             data.frame %>%
+             setNames(paste0(varnames, "_sd"))
+           cbind(centroid_dat, sd_dat) %>%
+             tibble::rownames_to_column("component") %>%
+             pivot_longer(-component, names_sep = "_", names_to = c("name", ".value")) %>%
+             mutate(sd = qnorm(1 - (0.05/2)) * sd) %>%
+             ggplot(aes(mean, component)) +
+             geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+             geom_vline(xintercept = c(-1, 1) * qnorm(1 - .2/2), lty = "dashed", color = "darkred") +
+             geom_linerange(aes(xmin = mean - sd, xmax = mean + sd)) +
+             geom_point(size = 2) +
+             facet_wrap(~name, ncol = 3, scales = "free_x") +
+             labs(title = strata$grp, x = NULL, y = NULL) +
+             theme_bw()
+         }) %>%
+  wrap_plots(nrow = 1)
+```
+
+
+```{r, fig.width=20, fig.height=10}
+bbdd %>%
+  select(age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin,
+         sex_female) %>%
+  group_by(sex_female, .add = T) %>%
+  group_split() %>%
+  map2(bbdd_umap_50_resid %>%
+         group_by(sex_female = sex, .add = T) %>%
+         group_split(),
+       ~.x %>%
+         bind_cols(.y %>% select(-sex_female, -X1, -X2)) %>%
+         pivot_longer(-c(cluster_gmm, sex, sex_female)) %>%
+         group_by(name) %>%
+         mutate(mval = mean(value)) %>%
+         ungroup %>%
+         mutate(name = factor(name,
+                              levels = c('age', 'BMI', 'HbA1c', 'Glucose', 'Leukocytes', 'Monocytes',
+                                         'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'TimeT2DM', 'Ferritin'))) %>%
+         ggplot(aes(cluster_gmm, value)) +
+         geom_boxplot(aes(group = cluster_gmm, colour = cluster_gmm)) +
+         geom_hline(aes(yintercept = mval), linetype = "dashed", color = "red") +
+         facet_wrap(~name, scales = "free", nrow = 1) +
+         theme_bw() +
+         theme(legend.position = 'none') +
+         labs(title = .x$sex[1], x = NULL, y = NULL)) %>%
+  modify_at(2, ~.x + labs(x = "Cluster")) %>%
+  wrap_plots(ncol = 1)
+```
+
+```{r}
+gmm10 <- gmm_res
+```
+
+
+## Análisis de supervivencia
+
+```{r}
+create_bbdd_clusters <- function(gmm_res){
+gmm_res <- list(gmm_res[[2]], gmm_res[[1]])
+bbdd_resid_sex <- bbdd_resid %>% group_by(sex_female) %>% group_split()
+bbdd_resid_clusters <- list()
+bbdd_resid_clusters[[2]] <- cbind(bbdd_resid_sex[[1]], gmm_res[[1]]$pred$cluster_labels)
+bbdd_resid_clusters[[1]] <- cbind(bbdd_resid_sex[[2]], gmm_res[[2]]$pred$cluster_labels)
+
+bbdd_covar_sex <- bbdd_covar %>% group_by(sex_female) %>% group_split()
+
+bbdd_num <- list()
+bbdd_num[[1]] <- bbdd_covar_sex[[1]][which(bbdd_covar_sex[[1]]$rowId %in% bbdd_resid_clusters[[1]]$rowId),]
+bbdd_num[[2]] <- bbdd_covar_sex[[2]][which(bbdd_covar_sex[[2]]$rowId %in% bbdd_resid_clusters[[2]]$rowId),]
+
+n <- colnames(bbdd_num[[1]])
+
+bbdd_clusters <- list()
+bbdd_clusters[[1]] <- cbind(bbdd_num[[1]], gmm_res[[2]]$pred$cluster_labels)
+bbdd_clusters[[2]] <- cbind(bbdd_num[[2]], gmm_res[[1]]$pred$cluster_labels)
+
+colnames(bbdd_clusters[[1]]) <- c(n, "clusters")
+colnames(bbdd_clusters[[2]]) <- c(n, "clusters")
+
+bbdd_clusters[[1]] <- bbdd_clusters[[1]] %>% filter(ami == 0, stroke == 0, angor==0, tia == 0)
+bbdd_clusters[[2]] <- bbdd_clusters[[2]] %>% filter(ami == 0, stroke == 0, angor==0, tia == 0)
+
+bbdd_clusters <- rbind(bbdd_clusters[[1]], bbdd_clusters[[2]])
+bbdd_clusters <- bbdd_clusters %>% select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, 
+                                                sex_female, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM, Ferritin, clusters,
+                                                t.ep_StrokeI, i.ep_StrokeI, stroke, t.ep_TIA, i.ep_TIA, tia,
+                                                t.ep_Angor, i.ep_Angor, angor, t.ep_AMI, i.ep_AMI, ami)
+
+bbdd_clusters$clusters <- as.factor(bbdd_clusters$clusters)
+
+return(bbdd_clusters)
+}
+```
+
+## 6 clusters
+
+```{r}
+bbdd_clusters_6 <- create_bbdd_clusters(gmm_6)
+head(bbdd_clusters_6)
+```
+
+### STROKE
+```{r}
+bbdd_clusters_6 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ clusters, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_6$clusters))
+
+bbdd_clusters_6$clusters <- as.factor(bbdd_clusters_6$clusters)
+
+clusters_men <- bbdd_clusters_6 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 4) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_6 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 2)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_6_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_6_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+### TIA
+
+```{r}
+bbdd_clusters_6 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ clusters, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_6$clusters))
+
+bbdd_clusters_6$clusters <- as.factor(bbdd_clusters_6$clusters)
+
+clusters_men <- bbdd_clusters_6 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 5) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_6 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 6)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_6_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_6_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,8) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 8) +
+    labs(x = "Hazard ratio")
+```
+
+
+### AMI
+```{r}
+bbdd_clusters_6 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ clusters, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_6$clusters))
+
+bbdd_clusters_6$clusters <- as.factor(bbdd_clusters_6$clusters)
+
+clusters_men <- bbdd_clusters_6 %>% filter(clusters != 6, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 3) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_6 %>% filter(clusters != 4, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 6)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_6_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_6_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+### ANGOR
+```{r}
+bbdd_clusters_6 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_Angor) ~ clusters, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_6$clusters))
+
+bbdd_clusters_6$clusters <- as.factor(bbdd_clusters_6$clusters)
+
+clusters_men <- bbdd_clusters_6 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters,6) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_6 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 6)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_6_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_Angor, i.ep_Angor)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_6_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_6_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+## 7 clusters
+
+```{r}
+bbdd_clusters_7 <- create_bbdd_clusters(gmm_7)
+head(bbdd_clusters_7)
+```
+
+### STROKE
+
+```{r}
+bbdd_clusters_7 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ clusters, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_7$clusters))
+
+bbdd_clusters_7$clusters <- as.factor(bbdd_clusters_7$clusters)
+
+clusters_men <- bbdd_clusters_7 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 2) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_7 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 1)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_7_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_7_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+
+### TIA
+```{r}
+bbdd_clusters_7 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ clusters, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+summary(as.factor(bbdd_clusters_7$clusters))
+
+bbdd_clusters_7$clusters <- as.factor(bbdd_clusters_7$clusters)
+
+clusters_men <- bbdd_clusters_7 %>% filter(clusters !=2, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 6) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_7 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 6)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_7_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_7_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### AMI
+```{r}
+bbdd_clusters_7 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ clusters, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+summary(as.factor(bbdd_clusters_7$clusters))
+
+bbdd_clusters_7$clusters <- as.factor(bbdd_clusters_7$clusters)
+
+clusters_men <- bbdd_clusters_7 %>% filter(clusters != 6, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 3) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_7 %>% filter(clusters !=4, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 6)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_7_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_7_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+### ANGOR
+```{r}
+bbdd_clusters_7 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_Angor) ~ clusters, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+summary(as.factor(bbdd_clusters_7$clusters))
+
+bbdd_clusters_7$clusters <- as.factor(bbdd_clusters_7$clusters)
+
+clusters_men <- bbdd_clusters_7 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 1) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_7 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 4)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_7_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_Angor, i.ep_Angor)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_7_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_7_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+## 8 clusters
+
+```{r}
+bbdd_clusters_8 <- create_bbdd_clusters(gmm_8)
+head(bbdd_clusters_8)
+```
+
+
+### STROKE
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ clusters, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_8$clusters))
+
+bbdd_clusters_8$clusters <- as.factor(bbdd_clusters_8$clusters)
+
+clusters_men <- bbdd_clusters_8 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 4) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_8 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 4)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_8_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_8_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+
+
+
+### TIA
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ clusters, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_8$clusters))
+
+bbdd_clusters_8$clusters <- as.factor(bbdd_clusters_8$clusters)
+
+clusters_men <- bbdd_clusters_8 %>% filter(clusters !=5, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, ref = 2) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_8 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 8)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_8_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_8_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+### AMI
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ clusters, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_8$clusters))
+
+bbdd_clusters_8$clusters <- as.factor(bbdd_clusters_8$clusters)
+
+clusters_men <- bbdd_clusters_8 %>% filter(clusters !=6, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 5) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_8 %>% filter(clusters !=8, clusters !=4, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 5)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_8_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_8_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,10) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_8_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 10) +
+    labs(x = "Hazard ratio")
+```
+
+## 9 clusters
+
+```{r}
+bbdd_clusters_9 <- create_bbdd_clusters(gmm_9)
+head(bbdd_clusters_9)
+```
+
+### STROKE
+
+```{r}
+bbdd_clusters_9 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ clusters, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+
+```{r}
+summary(as.factor(bbdd_clusters_9$clusters))
+
+bbdd_clusters_9$clusters <- as.factor(bbdd_clusters_9$clusters)
+
+clusters_men <- bbdd_clusters_9 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 9) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_9 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 1)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_9_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_9_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### TIA
+
+```{r}
+bbdd_clusters_9 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ clusters, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+```{r}
+summary(as.factor(bbdd_clusters_9$clusters))
+
+bbdd_clusters_9$clusters <- as.factor(bbdd_clusters_9$clusters)
+
+clusters_men <- bbdd_clusters_9 %>% filter(clusters !=6, clusters !=5, clusters !=2, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 8) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_9 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 8)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_9_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_9_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,8) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 8) +
+    labs(x = "Hazard ratio")
+```
+
+### AMI
+
+```{r}
+bbdd_clusters_9 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ clusters, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_9$clusters))
+
+bbdd_clusters_9$clusters <- as.factor(bbdd_clusters_9$clusters)
+
+clusters_men <- bbdd_clusters_9 %>% filter(clusters !=5, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 6) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_9 %>% filter(clusters !=8, clusters !=4, clusters !=1, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 5)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_9_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_9_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+###ANGOR
+
+```{r}
+bbdd_clusters_9 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_Angor) ~ clusters, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_9$clusters))
+
+bbdd_clusters_9$clusters <- as.factor(bbdd_clusters_9$clusters)
+
+clusters_men <- bbdd_clusters_9 %>% filter(sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 9) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_9 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 4)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_9_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_Angor, i.ep_Angor)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_9_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,8) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_9_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 8) +
+    labs(x = "Hazard ratio")
+```
+
+
+## 10 clusters
+
+```{r}
+bbdd_clusters_10 <- create_bbdd_clusters(gmm10)
+head(bbdd_clusters_10)
+```
+
+### STROKE
+
+```{r}
+bbdd_clusters_10 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ clusters, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+
+
+```{r}
+summary(as.factor(bbdd_clusters_10$clusters))
+
+bbdd_clusters_10$clusters <- as.factor(bbdd_clusters_10$clusters)
+
+clusters_men <- bbdd_clusters_10 %>% filter(clusters != 9, clusters !=5, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 2) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_10 %>% filter(clusters !=1, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 4)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_10_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_10_surv)
+```
+
+```{r}
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,4) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 4) +
+    labs(x = "Hazard ratio")
+```
+
+### TIA
+
+```{r}
+bbdd_clusters_10 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ clusters, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_10$clusters))
+
+bbdd_clusters_10$clusters <- as.factor(bbdd_clusters_10$clusters)
+
+clusters_men <- bbdd_clusters_10 %>% filter(clusters != 6, clusters != 5,
+                                            clusters != 2,sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 9) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_10 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 8)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_10_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_10_surv)
+```
+
+```{r}
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### AMI
+
+```{r}
+bbdd_clusters_10 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ clusters, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_10$clusters))
+
+bbdd_clusters_10$clusters <- as.factor(bbdd_clusters_10$clusters)
+
+clusters_men <- bbdd_clusters_10 %>% filter(clusters != 5, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 10) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_10 %>% filter(clusters !=8,clusters != 1, clusters != 4, sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 5)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_10_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_10_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+
+### ANGOR
+
+```{r}
+bbdd_clusters_10 %>% group_by(sex_female) %>% group_split %>% map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_Angor) ~ clusters, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+summary(as.factor(bbdd_clusters_10$clusters))
+
+bbdd_clusters_10$clusters <- as.factor(bbdd_clusters_10$clusters)
+
+clusters_men <- bbdd_clusters_10 %>% filter(clusters != 9, sex_female=="Men") #FILTRO CUANDO NO APARECE EVENTO
+clusters_men$clusters <- relevel(clusters_men$clusters, 7) #REFERENCIA MAYOR SUPERVIVENCIA
+
+clusters_women <- bbdd_clusters_10 %>% filter(sex_female=="Women")
+clusters_women$clusters <- relevel(clusters_women$clusters, ref = 8)
+
+clusters = list(clusters_men, clusters_women)
+
+bbdd_clusters_10_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_Angor, i.ep_Angor)~age + BMI+ clusters, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(bbdd_clusters_10_surv)
+```
+
+```{r}
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+options(repr.plot.width = 9, repr.plot.height = 3)
+bbdd_clusters_10_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+```{r}
+bbdd_clusters_8_sup <- create_bbdd_clusters(gmm_8)
+
+bbdd_clusters_8_sup <- bbdd_clusters_8_sup %>%
+  left_join(bbdd_covar %>% select(rowId, COPD, CKD, cancer, depress, htn, hf, liver, ra, sleep_apnea, pcos),  by = "rowId")
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$CKD,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("CKD", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+```
+
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$CKD,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("CKD"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$COPD,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("COPD", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+```
+
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$COPD,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("COPD"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$cancer,clus$clusters))
+  if(nrow(table_prob)>1){
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("CANCER", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+  }
+  else{
+      barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("CANCER", if_else(clus$sex_female[1] =="Men",
+                                                                                                        "MALE","FEMALE")),
+          col=c("green"))
+  }
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$cancer,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  if(nrow(table_prob)>1){
+  barplot(prob,legend.text = rownames(prob), main=paste(c("CANCER"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))}
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$htn,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("HYPERTENSION", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$htn,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("HYPERTENSION"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$hf,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("HEART FAILURE", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+
+```
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$hf,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("HEART FAILURE"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$liver,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("LIVER", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+
+```
+
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$liver,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("LIVER"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$ra,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("ARTHRITIS", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$ra,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("ARTHRITIS"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$sleep_apnea,clus$clusters))
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("SLEEP APNEA", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))
+})
+
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$sleep_apnea,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  barplot(prob,legend.text = rownames(prob), main=paste(c("SLEEP APNEA"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))
+})
+```
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$pcos,clus$clusters))
+  if(clus$sex_female[1]=="Women"){
+  barplot(table_prob, beside=TRUE, legend.text = rownames(table_prob), main=paste("POLYCYSTIC OVARY SYNDROME", if_else(clus$sex_female[1] == "Men","MALE", "FEMALE")),
+          col=c("green","red"))}
+})
+
+```
+
+
+```{r, fig.width=10, fig.height=4}
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(clus){
+  table_prob <- prop.table(table(clus$sleep_apnea,clus$clusters), margin=2)
+  table_prob <- as.data.frame(table_prob)
+  table_prob <- table_prob %>% filter (Var1==1) %>% select(Var2, Freq)
+  prob <- table_prob$Freq
+  names(prob) <- table_prob$Var2
+  if(clus$sex_female[1]=="Women"){
+  barplot(prob,legend.text = rownames(prob), main=paste(c("SLEEP APNEA"), if_else(clus$sex_female[1] == "Men", "MALE","FEMALE" )),
+          col=c("purple"))}
+})
+```
+
+## DISTRIBUCIÓN BMI EN CLUSTERS
+
+```{r}
+library("viridis")
+bbdd_clusters_8 %>% group_by(sex_female, .add=TRUE) %>% group_split() %>% map(function(dat){
+  boxplot(dat$BMI~dat$clusters,col=viridis(8), main=paste("BMI DISTRIBUTION IN", if_else(dat$sex_female[1]=="Men", "MALE", "FEMALE")),
+          xlab="CLUSTER", ylab="BMI")
+})
+
+```
+```{r}
+library(devtools)
+bbdd_clusters_8_sup %>% group_by(sex_female) %>% group_split() %>% map(function(dat){
+group_by(dat, clusters) %>%
+  summarise(
+    count = n(),
+    mean = mean(BMI, na.rm = TRUE),
+    sd = sd(BMI, na.rm = TRUE)
+  )})
+```
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female, .add=TRUE) %>% group_split() %>% map(function(dat){
+  res.aov <- aov(BMI ~ clusters, data = dat)
+  summary(res.aov)
+  TukeyHSD(res.aov)
+  })
+```
+
+## DISTRIBUCIÓN WEIGHT EN CLUSTERS
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female, .add=TRUE) %>% group_split() %>% map2(bbdd_covar %>% group_by(sex_female) %>% group_split,
+                                                                               function(dat, weight){
+  dat <- dat %>% left_join(weight %>% select(weight, rowId), by="rowId")
+  boxplot(dat$weight~dat$clusters,col=viridis(8), main=paste("WEIGTH DISTRIBUTION IN", if_else(dat$sex_female[1]=="Men", "MALE", "FEMALE")),
+          xlab="CLUSTER", ylab="BMI")
+})
+
+```
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female, .add=TRUE) %>% group_split() %>% map2(bbdd_covar %>% group_by(sex_female) %>% group_split,
+                                                                               function(dat, weight){
+group_by(dat, clusters) %>% left_join(weight %>% select(weight, rowId), by="rowId") %>% 
+  summarise(
+    count = n(),
+    mean = mean(weight, na.rm = TRUE),
+    sd = sd(BMI, na.rm = TRUE)
+  )})
+```
+
+```{r}
+bbdd_clusters_8 %>% group_by(sex_female, .add=TRUE) %>% group_split() %>% map2(bbdd_covar %>% group_by(sex_female) %>% group_split,
+                                                                               function(dat, weight){
+dat <- dat %>% left_join(weight %>% select(weight, rowId), by="rowId")
+  res.aov <- aov(weight~ clusters, data = dat)
+  print(summary(res.aov))
+  print(TukeyHSD(res.aov))
+                                                                               })
+```
+

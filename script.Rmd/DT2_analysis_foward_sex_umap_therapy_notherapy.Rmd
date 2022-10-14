@@ -1,0 +1,534 @@
+---
+title: "T2DM_analysis_therapy"
+output: html_document
+---
+
+```{r}
+setwd("C:/Users/20621066W/Desktop/T2DM")
+```
+
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(purrr)
+library(uwot)
+library(gridExtra)
+library(ClusterR)
+library(splines)
+library(flextable)
+library(archetypes)
+
+library(survival)
+library(survminer)
+library(ggfortify)
+library(ranger)
+library(stats)
+library(broom)
+
+library("viridis")
+library(devtools)
+```
+
+## Preparación de los datos
+
+```{r}
+# Carreguem les dades
+
+load("bbdd_covar_T2DM.RData")
+bbdd_covar <- bbdd_covar_T2DM
+bbdd_covar <- bbdd_covar %>%
+  mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
+         obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
+         sex_female = factor(sex_female, labels = c('Men', 'Women')),
+         obesity_BMI = factor(obesity_BMI, labels = c('No obesity', 'Obesity')),
+         TimeT2DM = TimeT2DM/365.25) %>% 
+  mutate_at(.vars = c('A10', 'A10A', 'A10B', 'C01', 'C02', 'C03', 'C07', 'C08', 'C09', 'C10', 'M01A'),
+            function(x) if_else(is.na(x), 0, x))
+```
+
+
+## Descriptiva de las variables
+
+```{r}
+desc_bbdd <- function(abbdd){
+  n_sex <- abbdd %>%
+    count(sex = sex_female)
+  abbdd %>%
+    group_by(sex_female) %>% 
+    summarise(name = 'total',
+             N = as.character(n()),
+             resum = as.character(n())) %>%
+    bind_rows(abbdd %>%
+                select(rowId, sex_female, Current, Former, obesity_BMI, A10A, A10B, C01, C02, C03, C07, C08,
+                       C09, C10, M01A, angor, ami, stroke, tia) %>%
+                mutate_if(is.numeric, as.character) %>% 
+                # mutate(Current = as.character(Current),
+                #        Former = as.character(Former),
+                #        obesity_BMI = as.character(obesity_BMI)) %>%
+                pivot_longer(cols = !contains(c('rowId', 'sex_female'))) %>%
+                group_by(sex_female, name, value) %>%
+                summarise(N = n(),
+                          .groups = 'keep') %>%
+                group_by(sex_female, name) %>%
+                transmute(sex_female,
+                          name,
+                          value,
+                          resum = sprintf('%i (%2.1f%%)', N, N/sum(N)*100)) %>%
+                filter(value != 0)) %>% 
+    bind_rows(abbdd %>%
+                select(-Current, -obesity_BMI, -Former, -A10, -A10A, -A10B, -C01,
+                       -C02, -C03, -C07, -C08, -C09, -C10, -M01A, -angor, -ami, -stroke, -tia) %>% 
+                pivot_longer(cols = !contains(c('rowId', 'sex_female'))) %>%
+                group_by(sex_female, name) %>%
+                summarise(N = sum(!is.na(value)),
+                          mn = mean(value, na.rm = T),
+                          sd = sd(value, na.rm = T),
+                          .groups = 'keep') %>%
+                transmute(sex_female,
+                          name, 
+                          N = sprintf('%i (%2.1f%%)', N, N/n_sex$n[n_sex$sex == sex_female]*100),
+                          resum = sprintf('%2.1f (%2.1f)', mn, sd))) %>%
+    filter(name != 'NA') %>% 
+    select(sex_female, name, value, N, resum) %>%
+    pivot_wider(names_from = sex_female,
+                values_from = c('N', 'resum')) %>% 
+    flextable %>%
+    autofit
+}
+#desc_bbdd(abbdd = bbdd_covar %>% select(-obesity, -T2DM))
+```
+
+```{r}
+remove_outliers <- function(x){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  upperbound <- m + (5*s)
+  lowerbound <- m - (5*s)
+  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
+}
+bbdd_covar <- bbdd_covar %>%
+  group_by(sex_female) %>% 
+  mutate(across(c('HbA1c', 'Leukocytes', 'Monocytes', 'cLDL', 'cHDL', 'Tg', 'DBP', 'SBP', 'Glucose',
+                  'TimeT2DM', 'Ferritin'),
+                remove_outliers)) %>%
+  ungroup
+  
+ind_cc <- complete.cases(bbdd_covar %>%
+                           select(rowId, age, HbA1c, BMI, TimeT2DM, Ferritin,
+                                  Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose))
+#, HbA1c
+bbdd <- bbdd_covar[ind_cc,] %>%
+  select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, cHDL, Tg, DBP, SBP, Glucose,
+         TimeT2DM, sex_female, obesity_BMI, Current, Former, Ferritin, 
+         ami, angor, stroke, tia,
+         A10, A10A, A10B, C01, C02, C03, C07, C08, C09, C10, M01A)
+desc_bbdd(abbdd = bbdd)
+```
+
+
+```{r}
+bbdd_covar_therapy <- list(bbdd_covar %>% filter(A10 ==1), bbdd_covar %>% filter (A10A == 1), bbdd_covar %>% filter (A10B == 1), bbdd_covar %>% filter(C01== 1),
+                           bbdd_covar %>% filter(C02== 1), bbdd_covar %>% filter(C03 ==1), bbdd_covar %>% filter(C07 ==1),
+                           bbdd_covar %>% filter(C08 ==1), bbdd_covar %>% filter(C09 ==1), bbdd_covar %>% filter(C10 ==1), bbdd_covar %>% filter(M01A ==1),
+                           bbdd_covar %>% filter(A10 !=1, A10A !=1, A10B != 1, C01 !=01, C02 !=1, C02 !=1, C03!=1, C07 != 1, C08 != 1, C09 != 1,
+                                                 C10 !=1, M01A !=1))
+names(bbdd_covar_therapy) <- c("A10", "A10A", "A10B", "C01", "C02", "C03", "C07", "C08", "C09", "C10", "M01A", "No_therapy")
+bbdd_covar_therapy <- bbdd_covar_therapy %>% map2(names(bbdd_covar_therapy),function(ther, names){
+  ther <- ther %>% select(rowId) %>% mutate(THERAPY = names)
+  ther <- ther %>% left_join(bbdd_covar, by="rowId")
+  ther$THERAPY <- as.factor(ther$THERAPY)
+  return(ther)
+})
+bbdd_covar_therapy <- rbind(bbdd_covar_therapy$A10,bbdd_covar_therapy$A10A, bbdd_covar_therapy$A10B, bbdd_covar_therapy$C01, bbdd_covar_therapy$C02,
+                            bbdd_covar_therapy$C03, bbdd_covar_therapy$C07, bbdd_covar_therapy$C08, bbdd_covar_therapy$C09,
+                            bbdd_covar_therapy$C10, bbdd_covar_therapy$M01A, bbdd_covar_therapy$No_therapy)
+bbdd_covar_therapy <- bbdd_covar_therapy  %>% filter(ami == 0, stroke == 0, angor==0, tia == 0)
+bbdd_covar_therapy <- bbdd_covar_therapy %>% group_by(sex_female) %>% group_split()
+```
+
+### STROKE SURVIVAL
+
+```{r}
+bbdd_covar_therapy %>%  map(function(data){
+  autoplot(survfit(Surv(t.ep_StrokeI, i.ep_StrokeI) ~ THERAPY, data=data), main="Stroke survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+clusters_men <- bbdd_covar_therapy[[1]] 
+clusters_men$THERAPY <- relevel(clusters_men$THERAPY, ref= "No_therapy") #REFERENCIA MENOR SUPERVIVENCIA
+
+clusters_women <- bbdd_covar_therapy[[2]]
+clusters_women$THERAPY <- relevel(clusters_women$THERAPY, ref = "No_therapy")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_StrokeI, i.ep_StrokeI)~age + BMI+ THERAPY, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+
+```
+
+### AMI SURVIVAL
+
+```{r}
+bbdd_covar_therapy %>%  map(function(data){
+  autoplot(survfit(Surv(t.ep_AMI, i.ep_AMI) ~ THERAPY, data=data), main="AMI survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+clusters_men <- bbdd_covar_therapy[[1]] 
+clusters_men$THERAPY <- relevel(clusters_men$THERAPY, ref= "No_therapy") #REFERENCIA MENOR SUPERVIVENCIA
+
+clusters_women <- bbdd_covar_therapy[[2]]
+clusters_women$THERAPY <- relevel(clusters_women$THERAPY, ref = "No_therapy")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_AMI, i.ep_AMI)~age + BMI+ THERAPY, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+```
+
+### TIA SURVIVAL
+
+```{r}
+bbdd_covar_therapy %>%  map(function(data){
+  autoplot(survfit(Surv(t.ep_TIA, i.ep_TIA) ~ THERAPY, data=data), main="TIA survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+clusters_men <- bbdd_covar_therapy[[1]] 
+clusters_men$THERAPY <- relevel(clusters_men$THERAPY, ref= "No_therapy") #REFERENCIA MENOR SUPERVIVENCIA
+
+clusters_women <- bbdd_covar_therapy[[2]]
+clusters_women$THERAPY <- relevel(clusters_women$THERAPY, ref = "No_therapy")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ THERAPY, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+
+```
+
+### ANGOR SURVIVAL
+
+```{r}
+bbdd_covar_therapy %>%  map(function(data){
+  autoplot(survfit(Surv(t.ep_Angor, i.ep_TIA) ~ THERAPY, data=data), main="Angor survival", censor.size = 0, surv.geom = "line",
+           conf.int.fill=NULL)
+})
+```
+
+```{r}
+clusters_men <- bbdd_covar_therapy[[1]] 
+clusters_men$THERAPY <- relevel(clusters_men$THERAPY, ref= "No_therapy") #REFERENCIA MENOR SUPERVIVENCIA
+
+clusters_women <- bbdd_covar_therapy[[2]]
+clusters_women$THERAPY <- relevel(clusters_women$THERAPY, ref = "No_therapy")
+
+clusters = list(clusters_men, clusters_women)
+
+diseases_surv <- clusters %>%
+  map(function(data) {mod = coxph(Surv(t.ep_TIA, i.ep_TIA)~age + BMI+ THERAPY, data=data)
+      tidy(mod, conf.int= TRUE, exponentiate=TRUE)})
+head(diseases_surv)
+```
+
+```{r}
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[1]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1,6) +
+    labs(x = "Hazard ratio")
+
+options(repr.plot.width = 9, repr.plot.height = 3)
+diseases_surv[[2]] %>%
+    ggplot(aes(estimate, term)) +
+    geom_vline(xintercept = 1, lty = "dashed") +
+    geom_linerange(aes(xmin = conf.low, xmax = conf.high)) +
+    geom_point(aes(color = term)) +
+    theme_bw() +
+    theme(legend.position = "none") +
+    xlim(-1, 6) +
+    labs(x = "Hazard ratio")
+
+```
+
+```{r}
+bbdd_covar_therapy %>% map(function(ther){
+  summary(ther$THERAPY)
+})
+```
+
+```{r}
+bbdd_covar_therapy %>% map(function(ther){
+  table_AMI <- as.data.frame(prop.table(table(ther$THERAPY, ther$i.ep_AMI)), margin=1)
+  table_AMI <- table_AMI %>% filter(Var2 == 1)
+  colnames(table_AMI) <- c("Cluster", "Disease", "Freq")
+  table_AMI <- table_AMI %>% mutate(Disease=dplyr::recode(Disease, '1'="AMI"))
+  
+  table_TIA <- as.data.frame(prop.table(table(ther$THERAPY, ther$i.ep_TIA), margin=1))
+  table_TIA <- table_TIA %>% filter(Var2 == 1)
+  colnames(table_TIA) <- c("Cluster", "Disease", "Freq")
+  table_TIA <- table_TIA %>% mutate(Disease=dplyr::recode(Disease, '1'="TIA"))
+  
+  table_Angor <- as.data.frame(prop.table(table(ther$THERAPY, ther$i.ep_Angor), margin=1))
+  table_Angor <- table_Angor %>% filter(Var2 == 1) 
+  colnames(table_Angor) <- c("Cluster", "Disease", "Freq")
+  table_Angor <- table_Angor %>% mutate(Disease=dplyr::recode(Disease, '1'="Angor"))
+  
+  table_StrokeI <- as.data.frame(prop.table(table(ther$THERAPY, ther$i.ep_StrokeI), margin=1))
+  table_StrokeI <- table_StrokeI %>% filter(Var2 == 1) 
+  colnames(table_StrokeI) <- c("Cluster", "Disease", "Freq")
+  table_StrokeI <- table_StrokeI %>% mutate(Disease=dplyr::recode(Disease, '1'="Stroke"))
+
+  table <- rbind(table_AMI, table_TIA, table_StrokeI, table_Angor)
+  print(table)
+  ggplot(table, aes(x=factor(Cluster), y=Freq, fill=factor(Disease))) + geom_bar(stat="identity", position= "dodge") +
+    ggtitle("Probability inside cluster") + xlab("Cluster") + ylab("Probability") + labs(fill="Disease")
+  
+})
+```
+
+```{r}
+lista <- list()
+```
+
+```{r}
+lista[[1]] <- bbdd_covar_therapy %>% map(function(ther){
+  table_prob <- table(factor(ther$i.ep_AMI),factor(ther$THERAPY))
+  test <- fisher.test(table_prob, simulate.p.value = TRUE)
+print(test)
+if(test$p.value < 0.05){
+  text <- paste(c("AMI difference among groups in"), if_else(ther$sex_female[1]  == "Women","women",  "men"), c("is significative"))
+  return(text)
+}
+})
+
+```
+
+```{r}
+
+lista[[2]] <- bbdd_covar_therapy %>% map(function(ther){
+  table_prob <- table(factor(ther$i.ep_TIA),factor(ther$THERAPY))
+  test <- fisher.test(table_prob, simulate.p.value = TRUE)
+print(test)
+if(test$p.value < 0.05){
+  text <- paste(c("TIA difference among groups in"), if_else(ther$sex_female[1] == "Women","women",  "men"), c("is significative"))
+  return(text)
+}
+})
+
+```
+
+```{r}
+lista[[3]] <- bbdd_covar_therapy %>% map(function(ther){
+  table_prob <- table(factor(ther$i.ep_StrokeI),factor(ther$THERAPY))
+  test <- fisher.test(table_prob, simulate.p.value = TRUE)
+print(test)
+if(test$p.value < 0.05){
+  text <- paste(c("Stroke difference among groups in"), if_else(ther$sex_female[1] == "Women","women",  "men"), c("is significative"))
+  return(text)
+}
+})
+```
+
+```{r}
+lista[[4]] <- bbdd_covar_therapy %>% map(function(ther){
+  table_prob <- table(factor(ther$i.ep_Angor),factor(ther$THERAPY))
+  test <- fisher.test(table_prob, simulate.p.value = TRUE)
+print(test)
+if(test$p.value < 0.05){
+  text <- paste(c("Angor difference among groups in"), if_else(ther$sex_female[1] == "Women","women",  "men"), c("is significative"))
+  return(text)
+}
+})
+```
+
+```{r}
+names(lista) <- c("AMI", "TIA", "Stroke", "Angor")
+lista
+```
+
+
+```{r}
+therapies<- levels(bbdd_covar_therapy[[1]]$THERAPY)
+bbdd_covar_therapy %>% map(function(ther){
+  for (x in 1:length(therapies)){
+    for (y in 1:length(therapies)){
+      if (y <= x){
+        next
+      }
+      else{
+        ther_selected <- ther %>% filter(ther$THERAPY == therapies[x] | ther$THERAPY == therapies[y])
+        table_prob <- table(factor(ther_selected$i.ep_Angor),factor(ther_selected$THERAPY))
+        test <- fisher.test(table_prob, simulate.p.value = TRUE)
+        if(test$p.value < 0.05){
+          print(paste("There are significative differences between", therapies[x], "y", therapies[y], "in",ther_selected$sex_female[1]))
+        }
+      }
+    }
+  }
+})
+
+```
+
+```{r}
+therapies<- levels(bbdd_covar_therapy[[1]]$THERAPY)
+bbdd_covar_therapy %>% map(function(ther){
+  for (x in 1:length(therapies)){
+    for (y in 1:length(therapies)){
+      if (y <= x){
+        next
+      }
+      else{
+        ther_selected <- ther %>% filter(ther$THERAPY == therapies[x] | ther$THERAPY == therapies[y])
+        table_prob <- table(factor(ther_selected$i.ep_StrokeI),factor(ther_selected$THERAPY))
+        test <- fisher.test(table_prob, simulate.p.value = TRUE)
+        if(test$p.value < 0.05){
+          print(paste("There are significative differences between", therapies[x], "y", therapies[y], "in",ther_selected$sex_female[1]))
+        }
+      }
+    }
+  }
+})
+
+```
+
+```{r}
+therapies<- levels(bbdd_covar_therapy[[1]]$THERAPY)
+bbdd_covar_therapy %>% map(function(ther){
+  for (x in 1:length(therapies)){
+    for (y in 1:length(therapies)){
+      if (y <= x){
+        next
+      }
+      else{
+        ther_selected <- ther %>% filter(ther$THERAPY == therapies[x] | ther$THERAPY == therapies[y])
+        table_prob <- table(factor(ther_selected$i.ep_AMI),factor(ther_selected$THERAPY))
+        test <- fisher.test(table_prob, simulate.p.value = TRUE)
+        if(test$p.value < 0.05){
+          print(paste("There is significative differente between", therapies[x], "y", therapies[y], "in",ther_selected$sex_female[1]))
+        }
+      }
+    }
+  }
+})
+
+```
+
+```{r}
+therapies<- levels(bbdd_covar_therapy[[1]]$THERAPY)
+bbdd_covar_therapy %>% map(function(ther){
+  for (x in 1:length(therapies)){
+    for (y in 1:length(therapies)){
+      if (y <= x){
+        next
+      }
+      else{
+        ther_selected <- ther %>% filter(ther$THERAPY == therapies[x] | ther$THERAPY == therapies[y])
+        table_prob <- table(factor(ther_selected$i.ep_TIA),factor(ther_selected$THERAPY))
+        test <- fisher.test(table_prob, simulate.p.value = TRUE)
+        if(test$p.value < 0.05){
+          print(paste("There is significative differente between", therapies[x], "y", therapies[y], "in",ther_selected$sex_female[1]))
+        }
+      }
+    }
+  }
+})
+
+```
+
+

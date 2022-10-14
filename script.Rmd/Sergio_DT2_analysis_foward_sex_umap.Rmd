@@ -3,9 +3,19 @@ title: "T2DM_analysis"
 output: html_document
 ---
 
+<<<<<<< HEAD
 ## Preparación de los datos
 
 ```{r}
+=======
+```{r}
+setwd("C:/Users/20621066W/Desktop/T2DM")
+```
+
+
+```{r}
+
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 library(ggplot2)
 library(dplyr)
 library(tidyr)
@@ -27,7 +37,19 @@ library(broom)
 
 library("viridis")
 library(devtools)
+<<<<<<< HEAD
 
+=======
+```
+
+## Preparación de los datos
+
+```{r}
+# Carreguem les dades
+
+load("bbdd_covar_T2DM.RData")
+bbdd_covar <- bbdd_covar_T2DM
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 bbdd_covar <- bbdd_covar %>%
   mutate(obesity_BMI = as.numeric(obesity == 1 | 30 <= BMI),
          obesity_BMI = if_else(is.na(obesity_BMI), 0, obesity_BMI),
@@ -151,7 +173,11 @@ ggplot(bbdd %>%
 ```
 
 ## Correlacions
+<<<<<<< HEAD
 ```{r correlations, fig.width=15, fig.height=5}
+=======
+```{r correlations, fig.width=12, fig.height=5}
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 bbdd %>%
   select(rowId, age, BMI, HbA1c, Leukocytes, Monocytes, cLDL, Tg, cHDL, DBP, SBP, Glucose, TimeT2DM,
          Ferritin,sex_female) %>%
@@ -212,7 +238,11 @@ bbdd_resid_saved <- bbdd_resid
 
 ## Correlations
 
+<<<<<<< HEAD
 ```{r, fig.width=15, fig.height=5}
+=======
+```{r, fig.width=11, fig.height=5}
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 bbdd_resid %>%
   map_dfr(~{.x %>% 
       select(-rowId) %>% 
@@ -578,7 +608,11 @@ head(umap_disease)
 ```
 
 
+<<<<<<< HEAD
 ```{r, fig.height=15}
+=======
+```{r}
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 options(repr.plot.width = 2, repr.plot.height = 10)
 umap_disease %>%
     split(f = .$sex) %>%
@@ -2367,6 +2401,7 @@ bbdd_clusters_8_surv[[2]] %>%
     labs(x = "Hazard ratio")
 ```
 
+<<<<<<< HEAD
 ### ANGOR
 
 ```{r}
@@ -2418,6 +2453,8 @@ bbdd_clusters_8_surv[[2]] %>%
     labs(x = "Hazard ratio")
 ```
 
+=======
+>>>>>>> 31b5cce8254d7ad496a0b577682cf72011107392
 ## 9 clusters
 
 ```{r}

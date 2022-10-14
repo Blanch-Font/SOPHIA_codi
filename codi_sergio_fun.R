@@ -292,14 +292,6 @@ cohortDefinitionSet <- data.frame(atlasId = rep(NA, 10),
                                   logicDescription = rep(as.character(NA), 10),
                                   generateStats = rep(T, 10))
 
-cohortDefinitionSet <- data.frame(atlasId = NA,
-                                  cohortId = 1,
-                                  cohortName = c("SIDIAP T2DM-WP5"),
-                                  sql = c(cohort_T2DM$ohdiSQL),
-                                  json = c(cohort_T2DM$circeJson),
-                                  logicDescription = NA,
-                                  generateStats = T)
-
 # Creation and saving in the server
 n_cohort <- createCohort(cdm_bbdd,
                          cdm_schema,
