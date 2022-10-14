@@ -9,10 +9,10 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE)
 library(flextable)
 library(ggplot2)
-library(dplyr)
-library(tidyr)
+# library(dplyr)
+# library(tidyr)
 library(patchwork)
-library(purrr)
+# library(purrr)
 # library(umap)
 # library(uwot)
 library(gridExtra)
@@ -20,38 +20,6 @@ library(ClusterR)
 library(splines)
 
 # library(dbscan)
-
-remove_outliers <- function(x){
-  m <- mean(x, na.rm = TRUE)
-  s <- sd(x, na.rm = TRUE)
-  upperbound <- m + (5*s)
-  lowerbound <- m - (5*s)
-  ifelse((x > lowerbound) & (x < upperbound), x, NaN)
-}
-
-bbdd_umap <- bbdd_covar %>% 
-  mutate(sex = if_else(sex_female == 1, 'Female', 'Male'),
-         WHR = if_else(sex_female == 1,
-                       if_else(obesity == 1 | 30 <= BMI, 0.9, 0.8),
-                       if_else(obesity == 1 | 30 <= BMI, 1, 0.9)),
-         CRP = if_else(20 < CRP, as.numeric(NA), CRP)) %>% 
-  select(eid = rowId,
-         age,
-         sex,
-         bmi = BMI,
-         whr = WHR,
-         sbp = SBP,
-         dbp = DBP,
-         alt = ALT,
-         scr =  Creatinine,
-         crp = CRP,
-         hdl = cHDL,
-         tg = Tg,
-         ldl = cLDL,
-         fg = Glucose,
-         smoking = Current) %>%
-  ## Removing outliers for all variables (except age)
-  mutate(across(-c(eid, sex, age), remove_outliers))
 ```
 
 # Description
@@ -99,13 +67,6 @@ bbdd_umap %>%
 
 ## Only Case-complet
 ```{r}
-recoded_dat <- bbdd_umap %>%
-  select(-crp) %>% 
-  ## Only complete cases
-  drop_na %>%
-  left_join(bbdd_umap %>%
-              select(eid, crp))
-
 recoded_dat %>%
   summarise(name = 'total',
            N = as.character(n()),
@@ -117,9 +78,10 @@ recoded_dat %>%
               group_by(name, value) %>%
               summarise(N = n(),
                         .groups = 'keep') %>%
+              group_by(name) %>%
               transmute(name,
                         value,
-                        summary = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100))) %>% 
+                        summary = sprintf('%i (%2.1f%%)', N, N/sum(N)* 100))) %>% 
   bind_rows(recoded_dat %>%
               select(-sex, -smoking) %>% 
               pivot_longer(cols = !eid) %>%
@@ -179,49 +141,6 @@ recoded_dat %>%
 ```
 
 # Stratification by sex and transformation
-```{r}
-strat_dat <- recoded_dat %>%
-  select(-crp) %>% 
-  split(f = .$sex) %>%
-  map(~{.x %>%
-      names %>%
-      setdiff(c("eid", "sex", "age", "smoking", "bmi")) %>%
-      map_dfc(function(feature){
-        paste(feature, "~ age + smoking + bmi") %>%
-          lm(data = .x) %>%
-          resid %>%
-          scale %>%
-          data.frame %>%
-          setNames(feature)
-      }) %>%
-      mutate(eid = .x$eid, .before = 1)
-  })
-
-strat_dat <- map2(strat_dat, recoded_dat %>% split(f = .$sex), ~{
-  y_cc <- .y %>%
-    select(eid, crp, age, smoking, bmi) %>%
-    drop_na
-  ay_cc <- lm(formula = crp ~ age + smoking + bmi,
-              data = y_cc) %>% 
-    resid %>%
-    scale %>%
-    data.frame %>% 
-    setNames('crp_nou')
-  y_cc <- y_cc %>% 
-    bind_cols(ay_cc)
-  # .y <- .y %>%
-  #   left_join(y_cc %>%
-  #               select(eid, crp_nou),
-  #             by = 'eid') %>%
-  #   mutate(crp_nou = if_else(is.na(crp_nou), 0, crp_nou))
-  .x %>%
-    left_join(y_cc %>%
-                select(eid, crp = crp_nou),
-              by = 'eid') %>%
-    mutate(crp = if_else(is.na(crp), 0, crp))
-})
-```
-
 ## Distribution
 ```{r, fig.width=20, fig.height=5}
 strat_dat %>%
@@ -255,31 +174,171 @@ strat_dat %>%
 
 # Map to UKBioBank
 ```{r}
-umap_embed <- strat_dat %>%
-  map2(umap_res, ~{
-    dat1 <- tibble(eid = .x$eid)
-    dat2 <- data.frame(umap_transform(X = .x %>% select(-eid),
-                                      model = .y))
-    bind_cols(dat1, dat2)
-  })
-
 umap_embed %>%
   bind_rows(.id = "sex") %>%
   ggplot(aes(X1, X2)) +
-  geom_point() +
+  geom_point(shape = '.') +
   facet_wrap(~sex, nrow = 1) +
   theme_bw() +
   labs(x = "UMAP1", y = "UMAP2")
 
 umap_embed %>%
-    bind_rows(.id = "sex") %>%
-    ggplot(aes(X1, X2)) +
-    geom_density_2d_filled() +
-    facet_wrap(~sex, nrow = 1) +
-    theme_bw() +
-    theme(legend.position = "none") +
-    labs(x = "UMAP1", y = "UMAP2")
+  bind_rows(.id = "sex") %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(shape = '.') +
+  facet_wrap(~sex, nrow = 1) +
+  scale_x_continuous(limits = c(-4, 3)) +
+  scale_y_continuous(limits = c(-5, 5)) +
+  theme_bw() +
+  labs(x = "UMAP1", y = "UMAP2")
+
+umap_embed %>%
+  bind_rows(.id = "sex") %>%
+  ggplot(aes(X1, X2)) +
+  # geom_density_2d_filled() +
+  ggdensity::geom_hdr() +
+  facet_wrap(~sex, nrow = 1) +
+  scale_x_continuous(limits = c(-4, 3)) +
+  scale_y_continuous(limits = c(-5, 5)) +
+  theme_bw() +
+  labs(x = "UMAP1", y = "UMAP2", alpha = "Probability")
 ```
+
+## Outlier
+### Original data
+```{r}
+umap_embed_fora <- umap_embed %>%
+  bind_rows(.id = "sex") %>%
+  mutate(fora = 5 < X1^2 + X2^2)
+
+bbdd_umap_fora <- bbdd_umap %>%
+  inner_join(umap_embed_fora %>% select(eid, fora),
+            by = 'eid')
+
+bbdd_umap_fora %>%
+  group_by(fora) %>% 
+  summarise(name = 'total',
+           N = as.character(n()),
+           summary = '') %>%
+  bind_rows(bbdd_umap_fora %>%
+              group_by(fora) %>% 
+              select(eid, fora, sex, smoking) %>%
+              mutate(smoking = as.character(smoking)) %>% 
+              pivot_longer(cols = !any_of(c('eid', 'fora'))) %>%
+              group_by(fora, name, value) %>%
+              summarise(N = n(),
+                        .groups = 'keep') %>%
+              group_by(fora, name) %>%
+              transmute(fora,
+                        name,
+                        value,
+                        summary = sprintf('%i (%2.1f%%)', N, N/sum(N)* 100))) %>% 
+  bind_rows(bbdd_umap_fora %>%
+              group_by(fora) %>% 
+              select(-sex, -smoking) %>% 
+              pivot_longer(cols = !any_of(c('eid', 'fora'))) %>%
+              group_by(fora, name) %>%
+              summarise(N = sum(!is.na(value)),
+                        mn = mean(value, na.rm = T),
+                        sd = sd(value, na.rm = T),
+                        min = min(value, na.rm = T),
+                        p025 = quantile(value, 0.025, na.rm = T),
+                        q1 = quantile(value, 1/4, na.rm = T),
+                        md = median(value, na.rm = T),
+                        q3 = quantile(value, 3/4, na.rm = T),
+                        p975 = quantile(value, 0.975, na.rm = T),
+                        max = max(value, na.rm = T)) %>%
+              transmute(fora,
+                        name, 
+                        N = sprintf('%i (%2.1f%%)', N, N/dim(bbdd_covar)[1]* 100),
+                        summary = sprintf('%2.1f (%2.1f)', mn, sd),
+                        min = sprintf('%2.1f', min),
+                        p025 = sprintf('%2.1f', p025),
+                        md_IQR = sprintf('%2.1f [%2.1f - %2.1f]', md, q1, q3),
+                        p975 = sprintf('%2.1f', p975),
+                        max = sprintf('%2.1f', max))) %>%
+  select(fora, name, value, N, summary, min, p025, md_IQR, p975, max) %>%
+  mutate(name = factor(name,
+                       levels = c('total', 'sex', 'smoking', 'age', 'alt', 'bmi', 'crp', 'dbp',
+                                  'fg', 'hdl', 'ldl', 'sbp', 'scr', 'tg', 'whr'))) %>% 
+  arrange(name, fora, value) %>% 
+  flextable %>%
+  autofit
+
+bbdd_umap_fora %>%
+    pivot_longer(-c(eid, fora, sex)) %>%
+    mutate(name = toupper(name)) %>%
+    ggplot(aes(value)) +
+    geom_histogram(bins = 50) +
+    facet_grid(sex + fora ~ name, scales = "free_x") +
+    theme_bw()
+```
+
+### Transformed data
+```{r}
+strat_dat_fora <- strat_dat %>%
+  bind_rows(.id = "sex") %>%
+  inner_join(umap_embed_fora %>% select(eid, fora),
+            by = 'eid')
+
+strat_dat_fora %>%
+  group_by(fora) %>% 
+  summarise(name = 'total',
+           N = as.character(n()),
+           summary = '') %>%
+  bind_rows(strat_dat_fora %>%
+              group_by(fora) %>% 
+              select(eid, fora, sex) %>%
+              pivot_longer(cols = !any_of(c('eid', 'fora'))) %>%
+              group_by(fora, name, value) %>%
+              summarise(N = n(),
+                        .groups = 'keep') %>%
+              group_by(fora, name) %>%
+              transmute(fora,
+                        name,
+                        value,
+                        summary = sprintf('%i (%2.1f%%)', N, N/sum(N)* 100))) %>% 
+  bind_rows(strat_dat_fora %>%
+              group_by(fora) %>% 
+              select(-sex) %>% 
+              pivot_longer(cols = !any_of(c('eid', 'fora'))) %>%
+              group_by(fora, name) %>%
+              summarise(N = sum(!is.na(value)),
+                        mn = mean(value, na.rm = T),
+                        sd = sd(value, na.rm = T),
+                        min = min(value, na.rm = T),
+                        p025 = quantile(value, 0.025, na.rm = T),
+                        q1 = quantile(value, 1/4, na.rm = T),
+                        md = median(value, na.rm = T),
+                        q3 = quantile(value, 3/4, na.rm = T),
+                        p975 = quantile(value, 0.975, na.rm = T),
+                        max = max(value, na.rm = T)) %>%
+              transmute(fora,
+                        name, 
+                        N = sprintf('%i', N),
+                        summary = sprintf('%2.1f (%2.1f)', mn, sd),
+                        min = sprintf('%2.1f', min),
+                        p025 = sprintf('%2.1f', p025),
+                        md_IQR = sprintf('%2.1f [%2.1f - %2.1f]', md, q1, q3),
+                        p975 = sprintf('%2.1f', p975),
+                        max = sprintf('%2.1f', max))) %>%
+  select(fora, name, value, N, summary, min, p025, md_IQR, p975, max) %>%
+  mutate(name = factor(name,
+                       levels = c('total', 'sex', 'smoking', 'age', 'alt', 'bmi', 'crp', 'dbp',
+                                  'fg', 'hdl', 'ldl', 'sbp', 'scr', 'tg', 'whr'))) %>% 
+  arrange(name, fora, value) %>% 
+  flextable %>%
+  autofit
+
+strat_dat_fora %>%
+    pivot_longer(-c(eid, fora, sex)) %>%
+    mutate(name = toupper(name)) %>%
+    ggplot(aes(value)) +
+    geom_histogram(bins = 50) +
+    facet_grid(sex + fora ~ name, scales = "free_x") +
+    theme_bw()
+```
+
 
 ## Overlaying input variables
 ```{r, fig.width=9, fig.height=12}
@@ -287,17 +346,17 @@ umap_embed %>%
   bind_rows(.id = "sex") %>%
   {
     d <- recoded_dat %>% 
-      select(eid, sex, age, bmi)
+      select(eid, sex, age, bmi, smoking)
     inner_join(., d, by = c("eid", "sex"))
   } %>%
-  pivot_longer(c(age, bmi)) %>%
+  pivot_longer(c(age, bmi, smoking)) %>%
   split(f = .$name) %>%
   imap(~{
     mp <- median(.x$value)
     .x %>%
       ggplot(aes(X1, X2)) +
-      geom_point(aes(color = value)) +
-      scale_color_gradient2(midpoint = mp) +
+      geom_point(aes(color = value), shape = '.') +
+      scale_color_gradient2(midpoint = mp, high = "red", low = "blue") +
       facet_wrap(~sex, nrow = 1) +
       theme_bw() +
       labs(x = "UMAP1", y = "UMAP2", 
@@ -316,7 +375,7 @@ umap_embed %>%
   tidyr::pivot_longer(-c(X1, X2, sex, eid)) %>%
   mutate(name = toupper(name)) %>% #, 
   ggplot(aes(X1, X2)) +
-  geom_point(aes(color = value)) +
+  geom_point(aes(color = value), shape = '.') +
   scale_color_gradient2(limits = c(-10, 10), low = scales::muted("blue"), high = scales::muted("red")) +
   facet_grid(sex ~ name) +
   theme_bw() +
@@ -353,59 +412,10 @@ umap_embed %>%
 
 ## Archetypes
 ```{r, fig.width=11, fig.height=5}
-archdat <- arch_mod %>%
-  map(~ data.frame(.x$archetypes),
-      .id = "sex")
-
-arch_dict <- l<- list(
-    Female = tribble(
-        ~archnum, ~archnam,
-        1, "High HDL/High BP",
-        2, "High LDL",
-        3, "High TG",
-        4, "High HDL",
-        5, "High WHR",
-        6, "High CRP",
-        7, "High BP",
-        8, "Low BP",
-        9, "High ALT",
-        10, "High SCr",
-        11, "Low WHR",
-        12, "High FG"
-    ),
-    Male = tribble(
-        ~archnum, ~archnam,
-        1, "High SCr",
-        2, "High FG",
-        3, "High BP",
-        4, "High CRP",
-        5, "High HDL",
-        6, "Low BP",
-        7, "High TG",
-        8, "High HDL/High BP",
-        9, "Low WHR",
-        10, "High ALT"
-    )
-)
-
-arch_labs <- archdat %>%
-  imap(~{
-    bind_cols(arch_dict[[.y]], .x)
-  })
-archdat_umap <- map(
-    setNames(c("Female", "Male"), c("Female", "Male")),
-    ~{
-        d <- select(arch_labs[[.x]], -c(archnum, archnam))
-        res <- umap_transform(d, umap_res[[.x]])
-        res <- data.frame(res)
-        bind_cols(select(arch_labs[[.x]], archnam), res)
-    }
-)
-
 map(c("Female", "Male"),
     ~{umap_embed[[.x]] %>%
         ggplot(aes(X1, X2)) +
-        geom_point(alpha = .1) +
+        geom_point(shape = '.') +
         geom_point(data = archdat_umap[[.x]], aes(fill = archnam), shape = 23, size = 3) +
         theme_bw() +
         labs(x = "UMAP1", y = "UMAP2", title = .x, fill = "Archetypes")
@@ -415,19 +425,6 @@ map(c("Female", "Male"),
 
 ## Distribution of probabilities
 ```{r, fig.width = 12, fig.height = 4}
-arch_probs <- map2(arch_mod, strat_dat, ~{
-  mod <- .x
-  mod$family$which <- "original"
-  dat <- select(.y, -eid)
-  p <- archetypes:::predict.archetypes(mod, dat)
-  data.frame(eid = .y$eid, p)
-  }) %>%
-  map2(arch_labs, ~{
-    colnames(.x) <- c("eid", gsub(" |/", "_", .y$archnam))
-    .x})
-arch_probs_long <- arch_probs %>%
-    map(pivot_longer, -eid, names_to = "archnam", values_to = "prob") %>%
-    map(mutate, archnam = gsub("_", " ", archnam))
 arch_probs_long %>%
     bind_rows(.id = "sex") %>%
     ggplot(aes(archnam, prob)) +
@@ -449,7 +446,7 @@ umap_embed %>%
     # map2(strat_dat, ~.y %>% select(eid) %>% bind_cols(.x)) %>%
     map2_dfr(arch_maxprob, inner_join, by = "eid", .id = "sex") %>%
     ggplot(aes(X1, X2)) +
-    geom_point(aes(color = archnam, alpha = prob)) +
+    geom_point(aes(color = archnam, alpha = prob), shape = '.') +
     guides(color = guide_legend(override.aes = list(shape = 19))) +
     scale_alpha_identity() +
     facet_wrap(~sex, nrow = 1) +
@@ -467,7 +464,7 @@ arch_maxprob %>%
         dd <- inner_join(ARCH, d, by = "eid")
         d %>%
           ggplot(aes(X1, X2)) +
-          geom_point(alpha = .1) +
+          geom_point(shape = '.', alpha = .1) +
           geom_point(data = dd, color = "red", alpha = .5, size = .2) +
           theme_bw() +
           labs(x = NULL, y = NULL, title = ARCH$archnam[1])
@@ -492,21 +489,13 @@ umap_embed %>%
 ```
 
 ## Overlaying prevalent diseases
-```{r}
-umap_disease <- umap_embed %>%
-  map2(.y = bbdd_covar %>%
-         rename(eid = rowId) %>% 
-         mutate(sex = if_else(sex_female == 1, 'Female', 'Male')) %>%
-         split(f = .$sex), ~{
-    .x %>%
-      left_join(.y,
-                by = 'eid')
-  })
+```{r, fig.width = 20, fig.height = 10}
 umap_disease %>%
     imap(~{
       .x %>%
-        tidyr::pivot_longer(c("angor", "tia", "stroke", "ami", "COPD", "CKD", "cancer", "depress",
-                              "htn", "hf", "liver", "ra", "sleep_apnea", "pcos"),
+        tidyr::pivot_longer(any_of(c("angor", "tia", "stroke", "ami", "COPD", "CKD", "cancer",
+                                     "depress", "htn", "hf", "liver", "ra", "sleep_apnea",
+                                     "pcos")),
                             names_to = "Disease",
                             values_to = "Diagnosis") %>%
         mutate(Disease = gsub("_", " ", Disease),

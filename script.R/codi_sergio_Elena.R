@@ -3,18 +3,18 @@ devtools::install_github("ohdsi/CirceR")
 devtools::install_github("ohdsi/Capr")
 devtools::install_github("ohdsi/CohortGenerator")
 devtools::install_github("ohdsi/CohortDiagnostics")
-devtools::install(pkg = '~idiap/projects/SOPHIA')
-# devtools::install_github('Blanch-Font/SOPHIA')
+# devtools::install(pkg = '~idiap/projects/SOPHIA')
+devtools::install_github('Blanch-Font/SOPHIA')
 
 library(SOPHIA)
 library(DatabaseConnector)
 library(magrittr)
 # library(Andromeda)
-# library(purrr)
-# library(uwot)
-# umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
-#                 ~load_uwot(paste0("umap_model_", .x)))
-# load('arch_mod.Rdata')
+library(purrr)
+library(uwot)
+umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
+                ~load_uwot(paste0("umap_model_", .x)))
+load('arch_mod.Rdata')
 
 Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "data/jdbcDrivers/")
 
@@ -150,8 +150,8 @@ bbdd_covar_T2DM <- buildFollowUp(cdm_bbdd,
                                  acohortId = 1,
                                  bbdd_covar = bbdd_covar_T2DM)
 bbdd_covar <- bbdd_covar_T2DM
-IN <- 'umap_daniel.Rmd'
-OUT <- 'umap_daniel_T2DM.html'
+IN <- 'Sergio_DT2_analysis_foward_sex_umap.Rmd'
+OUT <- 'Sergio_DT2_analysis_foward_sex_umap.html'
 .PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
 dir.create(.PATH, showWarnings = F, recursive = T)
 file.copy(from = IN, to = .PATH, overwrite = T)
@@ -199,8 +199,8 @@ bbdd_covar_T1DM <- buildFollowUp(cdm_bbdd,
                                  acohortId = 2,
                                  bbdd_covar = bbdd_covar_T1DM)
 bbdd_covar <- bbdd_covar_T1DM
-IN <- 'umap_daniel.Rmd'
-OUT <- 'umap_daniel_T1DM.html'
+IN <- 'Sergio_DT2_analysis_foward_sex_umap.Rmd'
+OUT <- 'Sergio_DT1_analysis_foward_sex_umap.html'
 .PATH = sprintf('.tmp/%s', strsplit(x = basename(OUT), split = "\\.")[[1]][1])
 dir.create(.PATH, showWarnings = F, recursive = T)
 file.copy(from = IN, to = .PATH, overwrite = T)
@@ -224,10 +224,10 @@ rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
 # }
 #
 
-fet_diag <- runDiagnostic(cdm_bbdd,
-                          cdm_schema,
-                          results_sc,
-                          cohortTable,
-                          cohortDefinitionSet)
-CohortDiagnostics::launchDiagnosticsExplorer(sqliteDbPath = 'MergedCohortDiagnosticsData.sqlite')
+# fet_diag <- runDiagnostic(cdm_bbdd,
+#                           cdm_schema,
+#                           results_sc,
+#                           cohortTable,
+#                           cohortDefinitionSet)
+# CohortDiagnostics::launchDiagnosticsExplorer(sqliteDbPath = 'MergedCohortDiagnosticsData.sqlite')
 disconnect(cdm_bbdd)
