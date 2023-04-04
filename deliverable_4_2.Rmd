@@ -1,0 +1,535 @@
+---
+title: "DELIVERABLE 4.2: Obesity's contribution to diabetes outcomes in people with T1D"
+author: "SP"
+date: "27/10/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require(stats)) install.packages('stats')
+library(stats)
+if (!require(tidyverse)) install.packages('tidyverse')
+library(tidyverse)
+if (!require(gtsummary)) install.packages('gtsummary')
+library(gtsummary)
+if (!require(survival)) install.packages('survival')
+library (survival)
+if (!require(survminer)) install.packages('survminer')
+library (survminer)
+if (!require(ggplot2)) install.packages('ggplot2')
+library (ggplot2)
+```
+
+## Logistic regressions
+
+```{r log, echo=FALSE, error=FALSE, warning=FALSE}
+
+## 4.1 Glycaemic control ####
+# mod1 <- glm(cat.hba1c ~ age + sex + bmi + disdur + insulin,
+#             data=df,
+#             family=binomial)
+mod1 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod2 <- glm(hypoglyc1 ~ age + sex + bmi + disdur + insulin,
+#             data=df,
+#             family=binomial)
+mod2 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod3 <- glm(hypoglyc2 ~ age + sex + bmi + disdur + insulin,
+#             data=df,
+#             family=binomial)
+mod3 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+## 4.2 Metabolic/lipid control ####
+# mod4 <- glm(cat.lipid ~ age + sex + bmi + disdur + insulin,
+#             data=df,
+#             family=binomial)
+mod4 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+## 3.3 Complications ####
+# mod5 <- glm(card ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod5 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod6 <- glm(card.mi ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod6 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod7 <- glm(card.stroke ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod7 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod8 <- glm(card.angina ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod8 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod9 <- glm(death ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod9 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod10 <- glm(neuro ~ age + sex + bmi + disdur + insulin +
+#               sbp + dbp + hba1c,
+#             data=df,
+#             family=binomial)
+mod10 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod11 <- glm(nefro ~ age + sex + bmi + disdur + insulin +
+#                sbp + dbp + hba1c,
+#              data=df,
+#              family=binomial)
+mod11 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod12 <- glm(ret ~ age + sex + bmi + disdur + insulin +
+#                sbp + dbp + hba1c,
+#              data=df,
+#              family=binomial)
+mod12 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod13 <- glm(foot ~ age + sex + bmi + disdur + insulin +
+#                sbp + dbp + hba1c,
+#              data=df,
+#              family=binomial)
+mod13 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+
+# mod14 <- glm(dka ~ age + sex + bmi + disdur + insulin +
+#                sbp + dbp + hba1c,
+#              data=df,
+#              family=binomial)
+mod14 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>%    
+  add_q() %>%
+  bold_labels() %>%
+  bold_p (q=TRUE)
+```
+
+## Kaplan Meier:
+
+```{r km, echo=FALSE, error=FALSE, warning=FALSE, fig.width=10, fig.height=7}
+# ## Check levels for cat.bmi
+# df$cat.bmi <- factor(df$cat.bmi,
+#                      levels = c("Normal weight", "Overweight", "Obesity"))
+# col.pal <- c("#42b540","#00468b", "#ed0000")
+
+## 5.1 Stratified Kaplan Meier ####
+
+### 5.1.1 Glycaemic control #####
+# km1<-survfit(Surv(time.hba1c, cont.hba1c==1)~ cat.bmi, data=df)
+plot1 <- ggsurvplot(km1, data = df,
+                         surv.median.line = "hv",
+                         risk.table = "abs_pct",
+                         palette = col.pal,
+                         pval = TRUE, pval.method = TRUE, 
+                         conf.int = TRUE, ggtheme = theme_minimal(),
+                         xlab = "Time in years", ylab = "Probability of survival",
+                         title = "Time to loss of glycaemic control",
+                         legend="bottom", legend.title= "BMI",
+                         legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                         font.legend =14,
+                         font.title= c(20, "bold", "darkblue"),
+                         xlim = c(0,12), caption = "CAT-DM1",
+                         break.time.by= 2, 
+                         font.x=14, font.y=14, font.caption=14,
+                         fontsize = 4,
+                         font.tickslab=14,
+                         censor = T, censor.shape = "|")
+
+plot1
+
+### 5.1.2 Complications #####
+# km2<-survfit(Surv(time.card, card==1)~ cat.bmi, data=df)
+plot2 <- ggsurvplot(km2, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to MACE",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+
+plot2
+
+# km3<-survfit(Surv(time.card.mi, card.mi==1)~ cat.bmi, data=df)
+plot3 <- ggsurvplot(km3, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to myocardial infarction",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+
+plot3
+
+# km4<-survfit(Surv(time.card.stroke, card.stroke==1)~ cat.bmi, data=df)
+plot4 <- ggsurvplot(km4, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to stroke",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+
+plot4
+
+# km5<-survfit(Surv(time.card.angina, card.angina==1)~ cat.bmi, data=df)
+plot5 <- ggsurvplot(km5, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to unstable angina",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+
+plot5
+
+# km6<-survfit(Surv(time.death, death==1)~ cat.bmi, data=df)
+plot6 <- ggsurvplot(km6, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to death",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot6
+
+# km7<-survfit(Surv(time.neuro, neuro==1)~ cat.bmi, data=df)
+plot7 <- ggsurvplot(km7, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to neuropathy",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot7
+
+# km8<-survfit(Surv(time.nefro, nefro==1)~ cat.bmi, data=df)
+plot8 <- ggsurvplot(km8, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to nephropathy",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot8
+
+# km9<-survfit(Surv(time.ret, ret==1)~ cat.bmi, data=df)
+plot9 <- ggsurvplot(km9, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to retinopathy",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot9
+
+# km10<-survfit(Surv(time.foot, foot==1)~ cat.bmi, data=df)
+plot10 <- ggsurvplot(km10, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to diabetic foot",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot10
+
+# km11<-survfit(Surv(time.dka, dka==1)~ cat.bmi, data=df)
+plot11 <- ggsurvplot(km11, data = df,
+                    surv.median.line = "hv",
+                    risk.table = "abs_pct",
+                    palette = col.pal,
+                    pval = TRUE, pval.method = TRUE, 
+                    conf.int = TRUE, ggtheme = theme_minimal(),
+                    xlab = "Time in years", ylab = "Probability of survival",
+                    title = "Time to diabetic ketoacidosis",
+                    legend="bottom", legend.title= "BMI",
+                    legend.labs= c("Normal weight", "Overweight", "Obesity"),
+                    font.legend =14,
+                    font.title= c(20, "bold", "darkblue"),
+                    xlim = c(0,12), caption = "CAT-DM1",
+                    break.time.by= 2, 
+                    font.x=14, font.y=14, font.caption=14,
+                    fontsize = 4,
+                    font.tickslab=14,
+                    censor = T, censor.shape = "|")
+plot11
+
+```
+
+## Cox regressions
+
+```{r cox, echo=FALSE, error=FALSE, warning=FALSE}
+### 4.2.1 Glycaemic control #####
+# cox1=coxph(Surv(time.hba1c, cont.hba1c==1) ~ age + sex + bmi + disdur + insulin,
+#            data=df,method="breslow")
+cox1 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+### 4.2.2 Complications #####
+# cox2=coxph(Surv(time.card, card==1) ~ age + sex + bmi + disdur + insulin,
+#            data=df,method="breslow")
+cox2 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox3=coxph(Surv(time.card.mi, card.mi==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox3 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox4=coxph(Surv(time.card.stroke, card.stroke==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox4 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox5=coxph(Surv(time.card.angina, card.angina==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox5 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox6=coxph(Surv(time.death, death==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox6 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox7=coxph(Surv(time.neuro, neuro==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox7 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox8=coxph(Surv(time.nefro, nefro==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox8 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox9=coxph(Surv(time.ret, ret==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox9 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p 
+
+# cox10=coxph(Surv(time.foot, foot==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox10 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+
+# cox11=coxph(Surv(time.dka, dka==1) ~ age + sex + bmi + disdur + insulin + 
+#              sbp + dbp + hba1c,
+#            data=df,method="breslow")
+cox11 %>%
+  tbl_regression(exponentiate=TRUE) %>%
+  add_nevent() %>% 
+  bold_labels() %>%
+  bold_p ()
+```

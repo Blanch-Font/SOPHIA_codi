@@ -2,7 +2,7 @@
 # Auxiliar package
 ###################################################################################################
 devtools::install_github("ohdsi/CirceR")
-devtools::install_github("ohdsi/Capr")
+devtools::install_github("ohdsi/Capr@a79c4d6d614dc916ae81c6c403e4f9be5c5f8eef")
 devtools::install_github("ohdsi/CohortGenerator")
 devtools::install_github("ohdsi/CohortDiagnostics")
 # devtools::install(pkg = '~idiap/projects/SOPHIA')
@@ -31,60 +31,6 @@ library(uwot)
 # Auxiliar Function
 # Funciones candidates a passar al paquete SOPHIA
 ###################################################################################################
-# Funcion para pasar del servidor a una tabla plana
-# Necesita totes les coses del servidor més quina cohort volem contruir.
-FunCovar <- function(acdm_bbdd = cdm_bbdd,
-                     acdm_schema = cdm_schema,
-                     aresults_sc = results_sc,
-                     acohortTable = cohortTable,
-                     aacohortId){
-  covariateData_aux <- buildData(cdm_bbdd = acdm_bbdd,
-                                 cdm_schema = acdm_schema,
-                                 results_sc = aresults_sc,
-                                 cohortTable = acohortTable,
-                                 acohortId = aacohortId)
-  covariateData2_aux <- FeatureExtraction::aggregateCovariates(covariateData_aux)
-  sel_med_conceptId <- c(21600712, #DRUGS USED IN DIABETES
-                         #Aquestes insulines no les troba
-                         21076306, 44058584, 21086042, 21036596,
-                         21601238, #C01
-                         21600381, #C02
-                         21601461, #C03
-                         21601664, #C07
-                         21601744, #C08
-                         21601782, #C09
-                         21601853, #C10
-                         21603933 #M01A
-  )
-  cov_cate_resum_aux <- covariateData2_aux$covariateRef %>%
-    dplyr::filter(analysisId %in% c(411, 413) & conceptId %in% sel_med_conceptId |
-                    !(analysisId %in% c(411, 413))) %>%
-    dplyr::inner_join(covariateData2_aux$covariates) %>%
-    dplyr::mutate(covariateId = as.character(floor(covariateId)),
-                  analysisId = as.integer(analysisId),
-                  conceptId = as.integer(conceptId),
-                  sumValue = as.integer(sumValue),
-                  averageValue = averageValue*100) %>%
-    dplyr::collect()
-  cov_num_resum_aux <- covariateData2_aux$covariateRef %>%
-    dplyr::inner_join(covariateData2_aux$covariatesContinuous) %>%
-    dplyr::mutate(covariateId = as.character(floor(covariateId)),
-                  analysisId = as.integer(analysisId),
-                  conceptId = as.integer(conceptId)) %>%
-    dplyr::select(-covariateId, -analysisId, -conceptId) %>%
-    dplyr::collect()
-  bbdd_covar_aux <- transformToFlat(covariateData_aux)
-  bbdd_covar_aux <- buildFollowUp(cdm_bbdd = acdm_bbdd,
-                                  cdm_schema = acdm_schema,
-                                  results_sc = aresults_sc,
-                                  cohortTable = acohortTable,
-                                  acohortId = aacohortId,
-                                  bbdd_covar = bbdd_covar_aux)
-  return(list(cov_cate_resum = cov_cate_resum_aux,
-              cov_num_resum = cov_num_resum_aux,
-              bbdd_covar = bbdd_covar_aux))
-}
-
 # Function to remove outlier defined as +-5*sd
 remove_outliers <- function(x){
   m <- mean(x, na.rm = TRUE)
@@ -173,6 +119,72 @@ FunStratDat <- function(arecoded_dat){
   })
 }
 
+FunStratDat_vr2 <- function(arecoded_dat){
+  strat_mod <- arecoded_dat %>%
+    dplyr::select(-crp) %>%
+    tidyr::pivot_longer(-c(eid, age, sex, smoking, bmi),
+                        names_to = "trait") %>%
+    tidyr::nest(data = -c(sex, trait)) %>%
+    dplyr::mutate(mod = purrr::map(data,
+                                   ~ lm(value ~ age + smoking + bmi,
+                                        data = .x)))
+  strat_predrsd <- strat_mod %>%
+    dplyr::transmute(sex,
+                     trait,
+                     eid = purrr::map(data, select, eid),
+                     pred = purrr::map(mod, fitted),
+                     rsd = purrr::map(mod, resid),
+                     std_rsd = purrr::map(rsd, ~as.vector(scale(.x)))) %>%
+    unnest(c(eid, pred, rsd, std_rsd))
+  crp_data <- arecoded_dat %>%
+    dplyr::select(eid, age, sex, smoking, bmi, crp) %>%
+    tidyr::pivot_longer(-c(eid, age, sex, smoking, bmi),
+                        names_to = "trait")
+  crp_mod <- crp_data %>%
+    dplyr::filter(!is.na(value)) %>%
+    tidyr::nest(data = -c(sex, trait)) %>%
+    dplyr::mutate(mod = purrr::map(data,
+                                   ~ lm(value ~ age + smoking + bmi,
+                                        data = .x)))
+  strat_predrsd <- strat_predrsd %>%
+    bind_rows(crp_data %>%
+                dplyr::left_join(crp_mod %>%
+                                   dplyr::transmute(sex,
+                                                    trait,
+                                                    eid = purrr::map(data, select, eid),
+                                                    pred = purrr::map(mod, fitted),
+                                                    rsd = purrr::map(mod, resid),
+                                                    std_rsd = purrr::map(rsd, ~as.vector(scale(.x)))) %>%
+                                   unnest(c(eid, pred, rsd, std_rsd)),
+                                 by = c('sex', 'trait', 'eid')) %>%
+                dplyr::select(sex, trait, eid, pred, rsd, std_rsd) %>%
+                dplyr::mutate(rsd = dplyr::if_else(is.na(rsd), 0, rsd),
+                              std_rsd = dplyr::if_else(is.na(std_rsd), 0, std_rsd))) %>%
+    dplyr::arrange(sex, trait, eid)
+  return(strat_predrsd)
+}
+
+# Function that returns probabilities for a given mixture of Gaussian distributions
+# X = Data
+# center = List of centers of each Gaussian distribution
+# covmats = List of covariance matrices for each Gaussian distribution
+# weights = List o weights for each Gaussian distribution
+getclusprob <- function(X, centers, covmats, weights){
+  # Calculating probability density functions
+  pdfs <- purrr::map2(centers,
+                      covmats,
+                      function(mu, covmat) mvtnorm::dmvnorm(X, mu, covmat))
+  # Calculating likelihoods
+  L <- purrr::map2(pdfs,
+                   weights,
+                   function(pd, w) pd*w)
+  # Joining in a matrix
+  Lmat <- do.call(cbind, L)
+  # Scaling by row to obtain probabilities
+  probs <- Lmat/rowSums(Lmat)
+  return(probs)
+}
+
 ###################################################################################################
 # Server Configuration
 ###################################################################################################
@@ -191,12 +203,15 @@ connectionDetails <- createConnectionDetails(dbms = dbms,
 cdm_bbdd <- connect(connectionDetails = connectionDetails)
 
 # Name in the server. Better in Renviron?
-cdm_schema <- 'omop21t2_test'
-results_sc <- 'sophia_test'
-cohortTable <- 'cohortTable'
+# cdm_schema <- 'omop21t2_test'
+# results_sc <- 'sophia_test'
+# cohortTable <- 'cohortTable'
+cdm_schema <- 'omop21t2_cmbd'
+results_sc <- 'results21t2_cmbd'
+cohortTable <- 'sophia'
 
 # SOPHIA package's directory
-SOPHIAroot <- 'renv/library/R-4.1/x86_64-pc-linux-gnu/SOPHIA/'
+SOPHIAroot <- 'renv/library/R-4.2/x86_64-pc-linux-gnu/SOPHIA/'
 
 ###################################################################################################
 # Cohort and Outcome creation
@@ -256,9 +271,57 @@ outcome_PAD <- CreateSQL_PAD(cdm_bbdd,
                              results_sc,
                              cohortTable)
 
+# Outcome Angor unstable
+outcome_angor_unstable <- CreateSQL_angor_unstable(cdm_bbdd,
+                                                   cdm_schema,
+                                                   results_sc,
+                                                   cohortTable)
+
+# Outcome AMI
+outcome_AMI_WP4 <- CreateSQL_AMI_WP4(cdm_bbdd,
+                                     cdm_schema,
+                                     results_sc,
+                                     cohortTable)
+
+# Outcome Stroke
+outcome_strokeWP4 <- CreateSQL_strokeWP4(cdm_bbdd,
+                                         cdm_schema,
+                                         results_sc,
+                                         cohortTable)
+
+# Outcome Neuropathy
+outcome_neuroWP4 <- CreateSQL_neuroWP4(cdm_bbdd,
+                                       cdm_schema,
+                                       results_sc,
+                                       cohortTable)
+
+# Outcome Nephropathy
+outcome_nephroWP4 <- CreateSQL_nephroWP4(cdm_bbdd,
+                                         cdm_schema,
+                                         results_sc,
+                                         cohortTable)
+
+# Outcome Retinopathy
+outcome_retinoWP4 <- CreateSQL_retinoWP4(cdm_bbdd,
+                                         cdm_schema,
+                                         results_sc,
+                                         cohortTable)
+
+# Outcome Diabetic foot
+outcome_footWP4 <- CreateSQL_footWP4(cdm_bbdd,
+                                     cdm_schema,
+                                     results_sc,
+                                     cohortTable)
+
+# Outcome Diabetic ketoacidosis
+outcome_DKAWP4 <- CreateSQL_DKAWP4(cdm_bbdd,
+                                   cdm_schema,
+                                   results_sc,
+                                   cohortTable)
+
 # Definition Set for cohort and outcome
-cohortDefinitionSet <- data.frame(atlasId = rep(NA, 10),
-                                  cohortId = 1:10,
+cohortDefinitionSet <- data.frame(atlasId = rep(NA, 18),
+                                  cohortId = 1:18,
                                   cohortName = c("SIDIAP T2DM-WP5",
                                                  "SIDIAP T1DM-WP4",
                                                  "Outcome: AMI",
@@ -268,7 +331,15 @@ cohortDefinitionSet <- data.frame(atlasId = rep(NA, 10),
                                                  "Outcome: Nephropathy",
                                                  "Outcome: Retinopathy",
                                                  "Outcome: Neuropathy",
-                                                 "Outcome: PAD"),
+                                                 "Outcome: PAD",
+                                                 "Outcome: Unstable Angor WP4",
+                                                 "Outcome: AMI WP4",
+                                                 "Outcome: Stroke WP4",
+                                                 "Outcome: Neuro WP4",
+                                                 "Outcome: Nephropathy due to DM1",
+                                                 "Outcome: Retinopathy due to DM1",
+                                                 "Outcome: Diabetic Foot due to DM1",
+                                                 "Outcome: DKA due to DM1"),
                                   sql = c(cohort_T2DM$ohdiSQL,
                                           cohort_T1DM$ohdiSQL,
                                           outcome_AMI$ohdiSQL,
@@ -278,7 +349,15 @@ cohortDefinitionSet <- data.frame(atlasId = rep(NA, 10),
                                           outcome_nephro$ohdiSQL,
                                           outcome_retino$ohdiSQL,
                                           outcome_neuro$ohdiSQL,
-                                          outcome_PAD$ohdiSQL),
+                                          outcome_PAD$ohdiSQL,
+                                          outcome_angor_unstable$ohdiSQL,
+                                          outcome_AMI_WP4$ohdiSQL,
+                                          outcome_strokeWP4$ohdiSQL,
+                                          outcome_neuroWP4$ohdiSQL,
+                                          outcome_nephroWP4$ohdiSQL,
+                                          outcome_retinoWP4$ohdiSQL,
+                                          outcome_footWP4$ohdiSQL,
+                                          outcome_DKAWP4$ohdiSQL),
                                   json = c(cohort_T2DM$circeJson,
                                            cohort_T1DM$circeJson,
                                            outcome_AMI$circeJson,
@@ -288,9 +367,17 @@ cohortDefinitionSet <- data.frame(atlasId = rep(NA, 10),
                                            outcome_nephro$circeJson,
                                            outcome_retino$circeJson,
                                            outcome_neuro$circeJson,
-                                           outcome_PAD$circeJson),
-                                  logicDescription = rep(as.character(NA), 10),
-                                  generateStats = rep(T, 10))
+                                           outcome_PAD$circeJson,
+                                           outcome_angor_unstable$circeJson,
+                                           outcome_AMI_WP4$circeJson,
+                                           outcome_strokeWP4$circeJson,
+                                           outcome_neuroWP4$circeJson,
+                                           outcome_nephroWP4$circeJson,
+                                           outcome_retinoWP4$circeJson,
+                                           outcome_footWP4$circeJson,
+                                           outcome_DKAWP4$circeJson),
+                                  logicDescription = rep(as.character(NA), 18),
+                                  generateStats = rep(T, 18))
 
 # Creation and saving in the server
 n_cohort <- createCohort(cdm_bbdd,
@@ -304,12 +391,17 @@ n_cohort <- createCohort(cdm_bbdd,
 ###################################################################################################
 umap_res <- map(setNames(c("Female", "Male"), c("Female", "Male")),
                 ~load_uwot(paste0("umap_model_", .x)))
-load('arch_mod.Rdata')
+# load('arch_mod.Rdata')
+load('cluster_params.RData')
 
 ###################################################################################################
 # T2DM Cohort Analysis
 ###################################################################################################
-bbdd_covar_T2DM_list <- FunCovar(aacohortId = 1)
+bbdd_covar_T2DM_list <- FunCovar(cdm_bbdd,
+                                 cdm_schema,
+                                 results_sc,
+                                 cohortTable,
+                                 acohortId = 1)
 save(bbdd_covar_T2DM_list$cov_cate_resum,
      bbdd_covar_T2DM_list$cov_num_resum,
      file = 'taules_desc_T2DM.RData')
@@ -317,84 +409,139 @@ save(bbdd_covar_T2DM_list$cov_cate_resum,
 bbdd_covar <- bbdd_covar_T2DM_list$bbdd_covar
 bbdd_umap <- FunDbUMAP(bbdd_covar)
 recoded_dat <- FunRecodeDat(bbdd_umap)
-strat_dat <- FunStratDat(recoded_dat)
+# strat_dat <- FunStratDat(recoded_dat)
+strat_predrsd <- FunStratDat_vr2(recoded_dat)
+strat_dat <- strat_predrsd %>%
+  dplyr::select(-c(pred, rsd)) %>%
+  tidyr::pivot_wider(names_from = trait, values_from = std_rsd) %>%
+  split(f = .$sex) %>%
+  map(select, -sex)
 umap_embed <- strat_dat %>%
   map2(umap_res, ~{
-    dat1 <- tibble::tibble(eid = .x$eid)
-    dat2 <- data.frame(uwot::umap_transform(X = .x %>% dplyr::select(-eid),
-                                            model = .y))
-    dplyr::bind_cols(dat1, dat2)
+    an <- 65000
+    nn <- ceiling(dim(.x)[1]/an)
+    # print(nn)
+    bind_rows(lapply(1:nn, function(i, xx = .x, yy = .y){
+      # print(i)
+      # print(min((1:an) + (i-1)*an, dim(xx)[1]))
+      ax <- xx[(1:an) + (i-1)*an,]
+      ax <- ax[complete.cases(ax),]
+      # print(dim(ax))
+      dat1 <- tibble::tibble(eid = ax$eid)
+      # print(summary(ax))
+      dat2 <- data.frame(uwot::umap_transform(X = ax %>% dplyr::select(-eid),
+                                              model = yy))
+      dplyr::bind_cols(dat1, dat2)
+    }))
+    # dat1 <- tibble::tibble(eid = .x$eid)
+    # dat2 <- data.frame(uwot::umap_transform(X = .x %>% dplyr::select(-eid),
+    #                                         model = .y))
+    # dplyr::bind_cols(dat1, dat2)
   })
-archdat <- arch_mod %>%
-  map(~ data.frame(.x$archetypes),
-      .id = "sex")
 
-arch_dict <- l<- list(
-  Female = tibble::tribble(
-    ~archnum, ~archnam,
-    1, "High HDL/High BP",
-    2, "High LDL",
-    3, "High TG",
-    4, "High HDL",
-    5, "High WHR",
-    6, "High CRP",
-    7, "High BP",
-    8, "Low BP",
-    9, "High ALT",
-    10, "High SCr",
-    11, "Low WHR",
-    12, "High FG"
-  ),
-  Male = tribble(
-    ~archnum, ~archnam,
-    1, "High SCr",
-    2, "High FG",
-    3, "High BP",
-    4, "High CRP",
-    5, "High HDL",
-    6, "Low BP",
-    7, "High TG",
-    8, "High HDL/High BP",
-    9, "Low WHR",
-    10, "High ALT"
-  )
-)
+probs <- map2(strat_dat,
+              cluster_params, ~{
+                d <- select(.x, -eid)
+                cluspars <- .y
+                centers <- map(cluspars, pluck, "center")
+                covmats <- map(cluspars, pluck, "cov")
+                weights <- map(cluspars, pluck, "weight")
+                getclusprob(d, centers, covmats, weights)
+                })
 
-arch_labs <- archdat %>%
-  imap(~{
-    dplyr::bind_cols(arch_dict[[.y]], .x)
-  })
-archdat_umap <- map(
-  setNames(c("Female", "Male"), c("Female", "Male")),
-  ~{
-    d <- arch_labs[[.x]] %>%
-      dplyr::select(-c(archnum, archnam))
-    res <- uwot::umap_transform(d,
-                                umap_res[[.x]])
-    res <- data.frame(res)
-    arch_labs[[.x]] %>%
-      dplyr::select(archnam) %>%
-      dplyr::bind_cols(res)
-  }
-)
+clusmap <- map(probs, ~{
+  data.frame(cluspos = 1:ncol(.x),
+             cluster = colnames(.x))
+})
+maxprob <- map2(map2(strat_dat,
+                     probs, ~{
+                       data.frame(eid = .x$eid,
+                                  cluspos = apply(.y, 1, which.max),
+                                  maxprob = apply(.y, 1, max))
+                      }),
+                clusmap, ~{
+                  .x %>%
+                    inner_join(.y,
+                               by = "cluspos") %>%
+                    select(-cluspos)})
+umap_embed_cluster <- map2(umap_embed,
+                          maxprob, ~{
+                            .x %>%
+                              inner_join(.y,
+                                         by = "eid")
+                          }) %>%
+  bind_rows(.id = 'sex')
 
-arch_probs <- map2(
-  arch_mod,
-  strat_dat,
-  ~{
-    mod <- .x
-    mod$family$which <- "original"
-    dat <- .y %>%
-      dplyr::select(-eid)
-    p <- archetypes:::predict.archetypes(mod, dat)
-    data.frame(eid = .y$eid, p)
-  }) %>%
-  map2(arch_labs,
-       ~{colnames(.x) <- c("eid", gsub(" |/", "_", .y$archnam))
-       .x})
-arch_probs_long <- arch_probs %>%
-  map(tidyr::pivot_longer, -eid, names_to = "archnam", values_to = "prob") %>%
-  map(dplyr::mutate, archnam = gsub("_", " ", archnam))
+# archdat <- arch_mod %>%
+#   map(~ data.frame(.x$archetypes),
+#       .id = "sex")
+#
+# arch_dict <- l<- list(
+#   Female = tibble::tribble(
+#     ~archnum, ~archnam,
+#     1, "High HDL/High BP",
+#     2, "High LDL",
+#     3, "High TG",
+#     4, "High HDL",
+#     5, "High WHR",
+#     6, "High CRP",
+#     7, "High BP",
+#     8, "Low BP",
+#     9, "High ALT",
+#     10, "High SCr",
+#     11, "Low WHR",
+#     12, "High FG"
+#   ),
+#   Male = tribble(
+#     ~archnum, ~archnam,
+#     1, "High SCr",
+#     2, "High FG",
+#     3, "High BP",
+#     4, "High CRP",
+#     5, "High HDL",
+#     6, "Low BP",
+#     7, "High TG",
+#     8, "High HDL/High BP",
+#     9, "Low WHR",
+#     10, "High ALT"
+#   )
+# )
+#
+# arch_labs <- archdat %>%
+#   imap(~{
+#     dplyr::bind_cols(arch_dict[[.y]], .x)
+#   })
+# archdat_umap <- map(
+#   setNames(c("Female", "Male"), c("Female", "Male")),
+#   ~{
+#     d <- arch_labs[[.x]] %>%
+#       dplyr::select(-c(archnum, archnam))
+#     res <- uwot::umap_transform(d,
+#                                 umap_res[[.x]])
+#     res <- data.frame(res)
+#     arch_labs[[.x]] %>%
+#       dplyr::select(archnam) %>%
+#       dplyr::bind_cols(res)
+#   }
+# )
+#
+# arch_probs <- map2(
+#   arch_mod,
+#   strat_dat,
+#   ~{
+#     mod <- .x
+#     mod$family$which <- "original"
+#     dat <- .y %>%
+#       dplyr::select(-eid)
+#     p <- archetypes:::predict.archetypes(mod, dat)
+#     data.frame(eid = .y$eid, p)
+#   }) %>%
+#   map2(arch_labs,
+#        ~{colnames(.x) <- c("eid", gsub(" |/", "_", .y$archnam))
+#        .x})
+# arch_probs_long <- arch_probs %>%
+#   map(tidyr::pivot_longer, -eid, names_to = "archnam", values_to = "prob") %>%
+#   map(dplyr::mutate, archnam = gsub("_", " ", archnam))
 umap_disease <- umap_embed %>%
   map2(.y = bbdd_covar %>%
          dplyr::rename(eid = rowId) %>%
@@ -417,7 +564,11 @@ rmarkdown::render(input = paste(.PATH, basename(IN), sep = "/"),
 ###################################################################################################
 # T1DM Cohort Analysis
 ###################################################################################################
-bbdd_covar_T1DM_list <- FunCovar(aacohortId = 2)
+bbdd_covar_T1DM_list <- FunCovar(cdm_bbdd,
+                                 cdm_schema,
+                                 results_sc,
+                                 cohortTable,
+                                 acohortId = 2)
 save(bbdd_covar_T1DM_list$cov_cate_resum,
      bbdd_covar_T1DM_list$cov_num_resum,
      file = 'taules_desc_T1DM.RData')
@@ -426,12 +577,34 @@ bbdd_covar <- bbdd_covar_T1DM_list$bbdd_covar
 bbdd_umap <- FunDbUMAP(bbdd_covar)
 recoded_dat <- FunRecodeDat(bbdd_umap)
 strat_dat <- FunStratDat(recoded_dat)
+# umap_embed <- strat_dat %>%
+#   map2(umap_res, ~{
+#     dat1 <- tibble::tibble(eid = .x$eid)
+#     dat2 <- data.frame(uwot::umap_transform(X = .x %>% dplyr::select(-eid),
+#                                             model = .y))
+#     dplyr::bind_cols(dat1, dat2)
+#   })
 umap_embed <- strat_dat %>%
   map2(umap_res, ~{
-    dat1 <- tibble::tibble(eid = .x$eid)
-    dat2 <- data.frame(uwot::umap_transform(X = .x %>% dplyr::select(-eid),
-                                            model = .y))
-    dplyr::bind_cols(dat1, dat2)
+    an <- 65000
+    nn <- ceiling(dim(.x)[1]/an)
+    # print(nn)
+    bind_rows(lapply(1:nn, function(i, xx = .x, yy = .y){
+      # print(i)
+      # print(min((1:an) + (i-1)*an, dim(xx)[1]))
+      ax <- xx[(1:an) + (i-1)*an,]
+      ax <- ax[complete.cases(ax),]
+      # print(dim(ax))
+      dat1 <- tibble::tibble(eid = ax$eid)
+      # print(summary(ax))
+      dat2 <- data.frame(uwot::umap_transform(X = ax %>% dplyr::select(-eid),
+                                              model = yy))
+      dplyr::bind_cols(dat1, dat2)
+    }))
+    # dat1 <- tibble::tibble(eid = .x$eid)
+    # dat2 <- data.frame(uwot::umap_transform(X = .x %>% dplyr::select(-eid),
+    #                                         model = .y))
+    # dplyr::bind_cols(dat1, dat2)
   })
 archdat <- arch_mod %>%
   map(~ data.frame(.x$archetypes),
