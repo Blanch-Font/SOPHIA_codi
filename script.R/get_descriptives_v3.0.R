@@ -35,9 +35,9 @@
 path <- ""
 
 # change as necessary:
-group_vars <- c("sex", "cat.bmi", "cat.age", "cat.hba1c", "cat.fglucose", "hypoglyc",
-                "card", "card.mi", "card.stroke", "card.angina", "death",
-                "neuro", "nefro", "ret", "foot", "dka")
+group_vars <- c("sex", "cat.bmi", "cat.age", "cat.hba1c", "cat.fglucose", "hypoglyc")#,
+                # "card", "card.mi", "card.stroke", "card.angina", "death",
+                # "neuro", "nefro", "ret", "foot", "dka")
 
 # change as necessary
 filter_5 <- FALSE
@@ -282,14 +282,14 @@ cat("Running statistical tests for numeric variables...\n")
 for (i in group_vars) {
   # cat('Group Var:', i, '\n')
   names_colnames <- colnames(df[sapply(df, is.numeric)])
-  if (i %in% c("cat.hba1c", "neuro", 'foot')){
+  if (i %in% c("cat.hba1c", "neuro", 'foot', 'death')){
     names_colnames <- names_colnames[names_colnames != "time.hba1c"]
   }
   if (i %in% c('hypoglyc', 'card.mi', 'card.angina', 'death', 'neuro', 'nefro', 'ret', 'foot',
                'dka', 'card.stroke')){
     names_colnames <- names_colnames[names_colnames != "cpep"]
   }
-  if (i %in% c('card.mi', 'neuro', 'nefro', 'ret', 'foot', 'dka', 'card.stroke')){
+  if (i %in% c('card.mi', 'neuro', 'nefro', 'ret', 'foot', 'dka', 'card.stroke', 'death')){
     names_colnames <- names_colnames[names_colnames != "vit.d"]
   }
   if (i == 'card.angina'){

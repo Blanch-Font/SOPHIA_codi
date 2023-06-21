@@ -233,9 +233,9 @@ vec_insulin <- c(1596977, 19058398, 19078552, 19078559, 19095211, 19095212, 1911
                  42481504, 42481541, 42899447, 42902356, 42902587, 42902742, 42902821, 42902945,
                  42903059, 44058584, 46233969, 46234047, 46234234, 46234237, 1502905, 1513843,
                  1513876, 1516976, 1531601, 1544838, 1550023, 1562586, 1567198, 1586346, 1586369,
-                 1588986, 1590165, 1596977, 19013926, 19013951, 19090180, 19090187, 19090204,
+                 1588986, 1590165, 19013926, 19013951, 19090180, 19090187, 19090204,
                  19090221, 19090226, 19090229, 19090244, 19090247, 19090249, 19091621, 35198096,
-                 35602717, 42899447, 46221581)
+                 35602717, 46221581)
 # sql_insulin <- "SELECT *
 #                 FROM @bbdd.DRUG_ERA
 #                 WHERE person_id IN (@id)
@@ -368,7 +368,7 @@ df <- bbdd_covar %>%
             #                                 (cLDL_1y < 100 & age < 35 | cLDL_1y < 116 & 35 <= age) &
             #                                 (50 <= cHDL_1y & sex_female == 1 | 40 <= cHDL_1y & sex_male == 1) &
             #                                 Tg_1y < 150)),
-            cpep = PEPTIDCs,
+            cpep = if_else(PEPTIDCs != -99999, PEPTIDCs, NA),
             #complicacions
             #antibodies
             ica = NULL,
@@ -387,16 +387,21 @@ df <- bbdd_covar %>%
             disdur = if_else(!is.na(TimeT1DM), TimeT1DM, TimeT1Rx)/365.25,
             sbp = SBP,
             dbp = DBP,
-            card = pmax(i.ep_AMI_WP4, i.ep_stroke_WP4, as.numeric(!is.na(DEATH_DATE))),
+            card = factor(pmax(i.ep_AMI_WP4, i.ep_stroke_WP4,
+                               as.numeric(!is.na(DEATH_DATE) & (DEATH_DATE - dintro) < 365))),
             card.mi = factor(i.ep_AMI_WP4),
             card.stroke = factor(i.ep_stroke_WP4),
             card.angina = factor(i.ep_Angor_unstable),
-            death = factor(as.numeric(!is.na(DEATH_DATE))),
+            death = factor(as.numeric(!is.na(DEATH_DATE) & (DEATH_DATE - dintro) < 365)),
             time.card = pmin(t.ep_AMI_WP4, t.ep_stroke_WP4),
             time.card.mi = t.ep_AMI_WP4,
             time.card.stroke = t.ep_stroke_WP4,
             time.card.angina = t.ep_Angor_unstable,
-            time.death = as.numeric(pmin(DEATH_DATE, OBSERVATION_PERIOD_END_DATE, na.rm = T) - dintro),
+            # time.death = as.numeric(pmin(DEATH_DATE, OBSERVATION_PERIOD_END_DATE, na.rm = T) - dintro),
+            time.death = pmin(as.numeric(if_else(is.na(DEATH_DATE),
+                                                 OBSERVATION_PERIOD_END_DATE,
+                                                 DEATH_DATE) - dintro)/365.25,
+                              1),
             neuro = factor(i.ep_neuroWP4),
             time.neuro = t.ep_neuroWP4,
             nefro =factor(i.ep_nephroWP4),
@@ -437,10 +442,10 @@ meas_post <- df %>%
              by = c("id" = "subjectId")) %>%
   mutate(time.hba1c = as.numeric(measurementDate - cohortStartDate)/365.25)
 
-df <- df %>%
-  left_join(meas_post %>%
-              select(id, cont.hba1c, time.hba1c),
-            by = 'id')
+# df <- df %>%
+#   left_join(meas_post %>%
+#               select(id, cont.hba1c, time.hba1c),
+#             by = 'id')
 
 source('script.R/get_descriptives_v3.0.R')
 source('deliverable_4_2.R')
